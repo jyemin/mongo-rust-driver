@@ -87,6 +87,7 @@ pub use crate::{
 pub use client::session::ClusterTime;
 pub use coll::Namespace;
 pub use index::IndexModel;
+pub use operation::Retryability;
 pub use sdam::public::*;
 pub use search_index::{SearchIndexModel, SearchIndexType};
 

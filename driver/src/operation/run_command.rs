@@ -10,7 +10,7 @@ use crate::{
     Database,
 };
 
-use super::{ExecutionContext, OperationWithDefaults};
+use super::{ExecutionContext, OperationWithDefaults, Retryability};
 
 #[derive(Debug, Clone)]
 pub(crate) struct RunCommand<'conn> {
@@ -124,6 +124,7 @@ pub(crate) struct RunCommandRaw<'conn> {
     command: RawDocumentBuf,
     selection_criteria: Option<SelectionCriteria>,
     pinned_connection: Option<&'conn PinnedConnectionHandle>,
+    retryability: Retryability,
 }
 
 impl<'conn> RunCommandRaw<'conn> {
@@ -138,6 +139,24 @@ impl<'conn> RunCommandRaw<'conn> {
             command,
             selection_criteria,
             pinned_connection,
+            retryability: Retryability::None,
+        }
+    }
+
+    /// Create a new RunCommandRaw with specified retryability
+    pub(crate) fn new_with_retryability(
+        db: Database,
+        command: RawDocumentBuf,
+        selection_criteria: Option<SelectionCriteria>,
+        pinned_connection: Option<&'conn PinnedConnectionHandle>,
+        retryability: Retryability,
+    ) -> Self {
+        Self {
+            db,
+            command,
+            selection_criteria,
+            pinned_connection,
+            retryability,
         }
     }
 
@@ -214,6 +233,10 @@ impl OperationWithDefaults for RunCommandRaw<'_> {
 
     fn name(&self) -> &CStr {
         self.command_name().unwrap_or(Self::NAME)
+    }
+
+    fn retryability(&self) -> Retryability {
+        self.retryability
     }
 
     #[cfg(feature = "opentelemetry")]

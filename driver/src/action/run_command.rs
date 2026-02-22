@@ -8,7 +8,7 @@ use crate::{
     coll::options::CursorType,
     db::options::{RunCommandOptions, RunCursorCommandOptions},
     error::{ErrorKind, Result},
-    operation::{run_command, run_cursor_command},
+    operation::{run_command, run_cursor_command, Retryability},
     selection_criteria::SelectionCriteria,
     ClientSession,
     Cursor,
@@ -81,6 +81,7 @@ impl Database {
             command: Ok(command),
             options: None,
             session: None,
+            retryability: Retryability::None,
         }
     }
 
@@ -245,6 +246,7 @@ pub struct RunCommandRaw<'a> {
     command: RawResult<RawDocumentBuf>,
     options: Option<RunCommandOptions>,
     session: Option<&'a mut ClientSession>,
+    retryability: Retryability,
 }
 
 #[option_setters(crate::db::options::RunCommandOptions)]
@@ -253,6 +255,15 @@ impl<'a> RunCommandRaw<'a> {
     /// Run the command using the provided [`ClientSession`].
     pub fn session(mut self, value: impl Into<&'a mut ClientSession>) -> Self {
         self.session = Some(value.into());
+        self
+    }
+
+    /// Set the retryability level for this command.
+    ///
+    /// By default, `run_raw_command_raw` uses `Retryability::None` (no retries).
+    /// Use this method to enable retryable reads or writes.
+    pub fn retryability(mut self, value: Retryability) -> Self {
+        self.retryability = value;
         self
     }
 }
@@ -288,11 +299,12 @@ impl<'a> Action for RunCommandRaw<'a> {
             }
         }
 
-        let operation = run_command::RunCommandRaw::new(
+        let operation = run_command::RunCommandRaw::new_with_retryability(
             self.db.clone(),
             command,
             selection_criteria,
             None,
+            self.retryability,
         );
         self.db
             .client()

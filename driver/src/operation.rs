@@ -92,10 +92,16 @@ pub(crate) struct ExecutionContext<'a> {
     pub(crate) effective_criteria: SelectionCriteria,
 }
 
+/// Retryability level for operations.
+///
+/// This determines how the driver handles retries for network errors and certain server errors.
 #[derive(Debug, PartialEq, Clone, Copy)]
-pub(crate) enum Retryability {
+pub enum Retryability {
+    /// Retryable write - requires implicit session with txnNumber for idempotency
     Write,
+    /// Retryable read - can be safely retried without idempotency concerns
     Read,
+    /// Not retryable - operation will not be retried
     None,
 }
 
