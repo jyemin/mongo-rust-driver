@@ -67,6 +67,23 @@ impl Database {
         }
     }
 
+    /// Runs a database-level command and returns the raw response bytes.
+    ///
+    /// This is a zero-copy variant that avoids parsing the response into a `Document`.
+    /// Useful for FFI scenarios where raw bytes are needed.
+    ///
+    /// `await` will return d[`Result<RawDocumentBuf>`].
+    #[deeplink]
+    #[options_doc(run_command)]
+    pub fn run_raw_command_raw(&self, command: RawDocumentBuf) -> RunCommandRaw<'_> {
+        RunCommandRaw {
+            db: self,
+            command: Ok(command),
+            options: None,
+            session: None,
+        }
+    }
+
     /// Runs a database-level command and returns a cursor to the response.
     ///
     /// `await` will return d[`Result<Cursor<Document>>`] or a
@@ -128,6 +145,17 @@ impl crate::sync::Database {
     #[options_doc(run_command, "run")]
     pub fn run_raw_command(&self, command: RawDocumentBuf) -> RunCommand<'_> {
         self.async_database.run_raw_command(command)
+    }
+
+    /// Runs a database-level command and returns the raw response bytes.
+    ///
+    /// This is a zero-copy variant that avoids parsing the response into a `Document`.
+    ///
+    /// [`run`](RunCommandRaw::run) will return d[`Result<RawDocumentBuf>`].
+    #[deeplink]
+    #[options_doc(run_command, "run")]
+    pub fn run_raw_command_raw(&self, command: RawDocumentBuf) -> RunCommandRaw<'_> {
+        self.async_database.run_raw_command_raw(command)
     }
 
     /// Runs a database-level command and returns a cursor to the response.
@@ -203,6 +231,69 @@ impl<'a> Action for RunCommand<'a> {
 
         let operation =
             run_command::RunCommand::new(self.db.clone(), command, selection_criteria, None);
+        self.db
+            .client()
+            .execute_operation(operation, self.session)
+            .await
+    }
+}
+
+/// Run a database-level command and return raw bytes. Create with [`Database::run_raw_command_raw`].
+#[must_use]
+pub struct RunCommandRaw<'a> {
+    db: &'a Database,
+    command: RawResult<RawDocumentBuf>,
+    options: Option<RunCommandOptions>,
+    session: Option<&'a mut ClientSession>,
+}
+
+#[option_setters(crate::db::options::RunCommandOptions)]
+#[export_doc(run_command_raw)]
+impl<'a> RunCommandRaw<'a> {
+    /// Run the command using the provided [`ClientSession`].
+    pub fn session(mut self, value: impl Into<&'a mut ClientSession>) -> Self {
+        self.session = Some(value.into());
+        self
+    }
+}
+
+#[action_impl]
+impl<'a> Action for RunCommandRaw<'a> {
+    type Future = RunCommandRawFuture;
+
+    async fn execute(self) -> Result<RawDocumentBuf> {
+        let mut selection_criteria = self.options.and_then(|o| o.selection_criteria);
+        let command = self.command?;
+        if let Some(session) = &self.session {
+            match session.transaction.state {
+                TransactionState::Starting | TransactionState::InProgress => {
+                    if command.get("readConcern").is_ok_and(|rc| rc.is_some()) {
+                        return Err(ErrorKind::InvalidArgument {
+                            message: "Cannot set read concern after starting a transaction".into(),
+                        }
+                        .into());
+                    }
+                    selection_criteria = match selection_criteria {
+                        Some(selection_criteria) => Some(selection_criteria),
+                        None => {
+                            if let Some(ref options) = session.transaction.options {
+                                options.selection_criteria.clone()
+                            } else {
+                                None
+                            }
+                        }
+                    };
+                }
+                _ => {}
+            }
+        }
+
+        let operation = run_command::RunCommandRaw::new(
+            self.db.clone(),
+            command,
+            selection_criteria,
+            None,
+        );
         self.db
             .client()
             .execute_operation(operation, self.session)
