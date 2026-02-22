@@ -82,6 +82,7 @@ impl Database {
             options: None,
             session: None,
             retryability: Retryability::None,
+            skip_session_injection: false,
         }
     }
 
@@ -247,6 +248,9 @@ pub struct RunCommandRaw<'a> {
     options: Option<RunCommandOptions>,
     session: Option<&'a mut ClientSession>,
     retryability: Retryability,
+    /// If true, the driver will not add session info (lsid, txnNumber, etc.) to the command.
+    /// Used when the command already contains session info from an external source (e.g., Java FFI).
+    skip_session_injection: bool,
 }
 
 #[option_setters(crate::db::options::RunCommandOptions)]
@@ -264,6 +268,16 @@ impl<'a> RunCommandRaw<'a> {
     /// Use this method to enable retryable reads or writes.
     pub fn retryability(mut self, value: Retryability) -> Self {
         self.retryability = value;
+        self
+    }
+
+    /// Skip session injection for this command.
+    ///
+    /// When set to true, the driver will not add `lsid`, `txnNumber`, `startTransaction`,
+    /// or `autocommit` to the command. Use this when the command already contains session
+    /// information from an external source (e.g., Java FFI binding).
+    pub fn skip_session_injection(mut self, value: bool) -> Self {
+        self.skip_session_injection = value;
         self
     }
 }
@@ -299,13 +313,23 @@ impl<'a> Action for RunCommandRaw<'a> {
             }
         }
 
-        let operation = run_command::RunCommandRaw::new_with_retryability(
-            self.db.clone(),
-            command,
-            selection_criteria,
-            None,
-            self.retryability,
-        );
+        let operation = if self.skip_session_injection {
+            run_command::RunCommandRaw::new_with_external_session(
+                self.db.clone(),
+                command,
+                selection_criteria,
+                None,
+                self.retryability,
+            )
+        } else {
+            run_command::RunCommandRaw::new_with_retryability(
+                self.db.clone(),
+                command,
+                selection_criteria,
+                None,
+                self.retryability,
+            )
+        };
         self.db
             .client()
             .execute_operation(operation, self.session)

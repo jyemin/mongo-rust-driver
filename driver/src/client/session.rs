@@ -272,7 +272,7 @@ impl ClientSession {
     }
 
     /// Whether this session is currently in a transaction.
-    pub(crate) fn in_transaction(&self) -> bool {
+    pub fn in_transaction(&self) -> bool {
         self.transaction.state == TransactionState::Starting
             || self.transaction.state == TransactionState::InProgress
     }
@@ -336,18 +336,23 @@ impl ClientSession {
     }
 
     /// Gets the current txn_number.
-    pub(crate) fn txn_number(&self) -> i64 {
+    pub fn txn_number(&self) -> i64 {
         self.server_session.txn_number
     }
 
-    /// Increments the txn_number.
-    pub(crate) fn increment_txn_number(&mut self) {
+    /// Increments the txn_number and returns the new value.
+    pub fn increment_txn_number(&mut self) -> i64 {
         self.server_session.txn_number += 1;
+        self.server_session.txn_number
     }
 
     /// Gets the txn_number to use for an operation based on the current transaction status and the
     /// operation's retryability.
-    pub(crate) fn get_txn_number_for_operation(
+    ///
+    /// For operations in a transaction, returns the current txn_number.
+    /// For retryable writes outside a transaction, increments and returns the new txn_number.
+    /// For other operations, returns None.
+    pub fn get_txn_number_for_operation(
         &mut self,
         retryability: Retryability,
     ) -> Option<i64> {

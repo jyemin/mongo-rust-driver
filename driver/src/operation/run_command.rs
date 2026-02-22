@@ -125,6 +125,9 @@ pub(crate) struct RunCommandRaw<'conn> {
     selection_criteria: Option<SelectionCriteria>,
     pinned_connection: Option<&'conn PinnedConnectionHandle>,
     retryability: Retryability,
+    /// If true, the driver will not add session info (lsid, txnNumber, etc.) to the command.
+    /// Used when the command already contains session info from an external source (e.g., Java FFI).
+    skip_session_injection: bool,
 }
 
 impl<'conn> RunCommandRaw<'conn> {
@@ -140,6 +143,7 @@ impl<'conn> RunCommandRaw<'conn> {
             selection_criteria,
             pinned_connection,
             retryability: Retryability::None,
+            skip_session_injection: false,
         }
     }
 
@@ -157,6 +161,25 @@ impl<'conn> RunCommandRaw<'conn> {
             selection_criteria,
             pinned_connection,
             retryability,
+            skip_session_injection: false,
+        }
+    }
+
+    /// Create a new RunCommandRaw with specified retryability and session skip flag
+    pub(crate) fn new_with_external_session(
+        db: Database,
+        command: RawDocumentBuf,
+        selection_criteria: Option<SelectionCriteria>,
+        pinned_connection: Option<&'conn PinnedConnectionHandle>,
+        retryability: Retryability,
+    ) -> Self {
+        Self {
+            db,
+            command,
+            selection_criteria,
+            pinned_connection,
+            retryability,
+            skip_session_injection: true,
         }
     }
 
@@ -216,6 +239,11 @@ impl OperationWithDefaults for RunCommandRaw<'_> {
     }
 
     fn supports_sessions(&self) -> bool {
+        // If skip_session_injection is set, return false to prevent the driver from
+        // adding lsid/txnNumber/etc. (the command already has them from external source)
+        if self.skip_session_injection {
+            return false;
+        }
         self.command_name()
             .map(|command_name| {
                 !SESSIONS_UNSUPPORTED_COMMANDS.contains(command_name.to_lowercase().as_str())
