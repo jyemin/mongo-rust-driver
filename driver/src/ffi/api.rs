@@ -139,13 +139,14 @@ pub extern "C" fn mongo_update_log_levels(
 /// NOTE: Callbacks must be the LAST parameters for JNA compatibility
 /// NOTE: Logging is now initialized globally via mongo_init_logging()
 /// NOTE: max_document_length controls log truncation per-client
+/// NOTE: command_event_callback can be NULL if no event monitoring is needed
 #[no_mangle]
 pub extern "C" fn mongo_client_new(
     connection_settings: *const ConnectionSettings,
     auth_settings: *const AuthSettings,
     tls_settings: *const TlsSettings,
     max_document_length: i32,
-    command_event_callback: Option<CommandEventCallback>,
+    command_event_callback: CommandEventCallback,
 ) -> *mut MongoClient {
     if connection_settings.is_null() {
         return std::ptr::null_mut();
@@ -185,21 +186,23 @@ pub extern "C" fn mongo_client_new(
 }
 
 /// Build ClientOptions from settings structs
+/// Note: command_event_callback is a nullable function pointer (NULL = no callback)
 unsafe fn build_client_options(
     connection_settings: *const ConnectionSettings,
     auth_settings: *const AuthSettings,
     tls_settings: *const TlsSettings,
     max_document_length: i32,
-    command_event_callback: Option<CommandEventCallback>,
+    command_event_callback: CommandEventCallback,
 ) -> Result<ClientOptions, Box<dyn std::error::Error>> {
     let conn_settings = &*connection_settings;
 
     // Start with default options
     let mut options = ClientOptions::default();
 
-    // Wire up command event handler if callback was provided
-    if let Some(callback) = command_event_callback {
-        options.command_event_handler = Some(create_command_event_handler(callback));
+    // Wire up command event handler if callback was provided (non-null function pointer)
+    // In C, function pointers can be null - we check by casting to usize and comparing to 0
+    if (command_event_callback as usize) != 0 {
+        options.command_event_handler = Some(create_command_event_handler(command_event_callback));
     }
 
     // Apply connection settings
@@ -237,9 +240,12 @@ unsafe fn build_client_options(
     }
 
     // Apply max document length for tracing/logging truncation
+    #[cfg(feature = "tracing-unstable")]
     if max_document_length > 0 {
         options.tracing_max_document_length_bytes = Some(max_document_length as usize);
     }
+    #[cfg(not(feature = "tracing-unstable"))]
+    let _ = max_document_length; // Silence unused warning
 
     // Apply authentication settings
     if !auth_settings.is_null() {
