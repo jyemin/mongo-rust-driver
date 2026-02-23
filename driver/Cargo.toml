@@ -13,6 +13,9 @@ edition.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[lib]
+crate-type = ["rlib", "cdylib"]
+
 exclude = [
     "etc/**",
     "rustfmt.toml",
