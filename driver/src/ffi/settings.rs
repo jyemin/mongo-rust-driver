@@ -140,4 +140,3 @@ impl TlsSettings {
         self.enabled == 1
     }
 }
-

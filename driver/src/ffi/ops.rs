@@ -4,12 +4,12 @@
 //! and JNI bindings can call. They handle command execution and return Results,
 //! leaving callback invocation to the caller.
 
+use super::core;
+use super::cursor::CursorManager;
 use crate::bson::RawDocumentBuf;
 use crate::raw_batch_cursor::RawBatchCursor;
 use crate::Client;
 use crate::Retryability;
-use super::cursor::CursorManager;
-use super::core;
 use std::sync::Arc;
 
 /// Result of executing a cursor command - contains cursor handle, exhausted flag, and first batch bytes.
@@ -51,7 +51,8 @@ pub async fn execute_command_raw(
     skip_session_injection: bool,
 ) -> Result<RawDocumentBuf, Vec<u8>> {
     let db = client.database(db_name);
-    let result = db.run_raw_command_raw(command)
+    let result = db
+        .run_raw_command_raw(command)
         .retryability(retry)
         .skip_session_injection(skip_session_injection)
         .await;
@@ -79,7 +80,8 @@ pub async fn execute_cursor_command(
 
     let db = client.database(db_name);
 
-    let mut action = db.run_raw_cursor_command_raw(command)
+    let mut action = db
+        .run_raw_cursor_command_raw(command)
         .retryability(retry)
         .skip_session_injection(skip_session_injection);
 
@@ -107,13 +109,21 @@ pub async fn execute_cursor_command(
                     let exhausted = cursor.is_exhausted();
                     let cursor_handle = cursor_manager.store(cursor);
                     let first_batch_bytes = super::cursor::raw_batch_to_bytes(&batch);
-                    Ok(CursorCommandResult { cursor_handle, exhausted, first_batch_bytes })
+                    Ok(CursorCommandResult {
+                        cursor_handle,
+                        exhausted,
+                        first_batch_bytes,
+                    })
                 }
                 Some(Err(e)) => Err(core::serialize_mongodb_error(&e)),
                 None => {
                     // Empty result - cursor is exhausted
                     let cursor_handle = cursor_manager.store(cursor);
-                    Ok(CursorCommandResult { cursor_handle, exhausted: true, first_batch_bytes: Vec::new() })
+                    Ok(CursorCommandResult {
+                        cursor_handle,
+                        exhausted: true,
+                        first_batch_bytes: Vec::new(),
+                    })
                 }
             }
         }
@@ -146,7 +156,10 @@ pub async fn execute_get_more(
             } else {
                 cursor_manager.remove(cursor_handle);
             }
-            Ok(GetMoreResult { exhausted, batch_bytes })
+            Ok(GetMoreResult {
+                exhausted,
+                batch_bytes,
+            })
         }
         Some(Err(e)) => {
             cursor_manager.put(cursor_handle, cursor);
@@ -154,8 +167,10 @@ pub async fn execute_get_more(
         }
         None => {
             cursor_manager.remove(cursor_handle);
-            Ok(GetMoreResult { exhausted: true, batch_bytes: Vec::new() })
+            Ok(GetMoreResult {
+                exhausted: true,
+                batch_bytes: Vec::new(),
+            })
         }
     }
 }
-

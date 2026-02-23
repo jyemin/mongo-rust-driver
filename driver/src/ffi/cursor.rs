@@ -3,10 +3,10 @@
 // This module provides cursor management for iterating over MongoDB query results.
 // We use the Rust driver's RawBatchCursor which handles pinning internally.
 
+use crate::raw_batch_cursor::RawBatchCursor;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use crate::raw_batch_cursor::RawBatchCursor;
 
 /// Manages RawBatchCursor instances for FFI.
 /// Thread-safe storage of cursors indexed by handle.
@@ -52,7 +52,10 @@ impl CursorManager {
 
     /// Check if a cursor exists.
     pub fn exists(&self, handle: u64) -> bool {
-        self.cursors.lock().ok().map_or(false, |c| c.contains_key(&handle))
+        self.cursors
+            .lock()
+            .ok()
+            .map_or(false, |c| c.contains_key(&handle))
     }
 }
 
@@ -68,4 +71,3 @@ pub fn raw_batch_to_bytes(batch: &crate::raw_batch_cursor::RawBatch) -> Vec<u8> 
     // RawBatch contains the full server response, just return its bytes
     batch.as_raw_document().as_bytes().to_vec()
 }
-

@@ -3,10 +3,10 @@
 // This is a lower-level abstraction than Rust driver's ClientSession.
 // Java owns transaction state; Rust owns session identity (lsid) and txnNumber.
 
+use crate::bson::{doc, spec::BinarySubtype, Binary, Bson, Document};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
-use crate::bson::{doc, spec::BinarySubtype, Binary, Bson, Document};
 use uuid::Uuid;
 
 /// A server session - just identity and txnNumber
@@ -26,41 +26,41 @@ impl FfiSession {
             subtype: BinarySubtype::Uuid,
             bytes: Uuid::new_v4().as_bytes().to_vec(),
         });
-        
+
         FfiSession {
             lsid: doc! { "id": binary },
             txn_number: 0,
             dirty: false,
         }
     }
-    
+
     /// Get the session identifier (lsid) as BSON bytes
     pub fn get_lsid_bytes(&self) -> Vec<u8> {
         crate::bson::to_vec(&self.lsid).unwrap_or_default()
     }
-    
+
     /// Get the session identifier document
     pub fn get_lsid(&self) -> &Document {
         &self.lsid
     }
-    
+
     /// Get the current transaction number
     pub fn get_txn_number(&self) -> i64 {
         self.txn_number
     }
-    
+
     /// Advance the transaction number and return the new value
     /// Used for retryable writes and starting transactions
     pub fn advance_txn_number(&mut self) -> i64 {
         self.txn_number += 1;
         self.txn_number
     }
-    
+
     /// Mark the session as dirty (should not be returned to pool)
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
     }
-    
+
     /// Check if session is dirty
     pub fn is_dirty(&self) -> bool {
         self.dirty
@@ -86,7 +86,7 @@ impl FfiSessionPool {
             available: RwLock::new(Vec::new()),
         }
     }
-    
+
     /// Acquire a session from the pool (or create a new one)
     /// Returns a session handle (non-zero)
     pub fn acquire(&self) -> u64 {
@@ -104,18 +104,18 @@ impl FfiSessionPool {
                 // Session was dirty or gone, try next
             }
         }
-        
+
         // Create a new session
         let handle = self.next_handle.fetch_add(1, Ordering::SeqCst);
         let session = FfiSession::new();
-        
+
         if let Ok(mut sessions) = self.sessions.write() {
             sessions.insert(handle, session);
         }
-        
+
         handle
     }
-    
+
     /// Release a session back to the pool
     pub fn release(&self, handle: u64) {
         if let Ok(sessions) = self.sessions.read() {
@@ -126,12 +126,12 @@ impl FfiSessionPool {
                 }
             }
         }
-        
+
         if let Ok(mut available) = self.available.write() {
             available.push(handle);
         }
     }
-    
+
     /// Get a session by handle (for read operations)
     pub fn with_session<F, R>(&self, handle: u64, f: F) -> Option<R>
     where
@@ -139,7 +139,7 @@ impl FfiSessionPool {
     {
         self.sessions.read().ok()?.get(&handle).map(f)
     }
-    
+
     /// Get a mutable session by handle (for write operations)
     pub fn with_session_mut<F, R>(&self, handle: u64, f: F) -> Option<R>
     where
@@ -155,12 +155,14 @@ impl FfiSessionPool {
 
     /// Get the current transaction number for a session
     pub fn get_txn_number(&self, handle: u64) -> i64 {
-        self.with_session(handle, |s| s.get_txn_number()).unwrap_or(0)
+        self.with_session(handle, |s| s.get_txn_number())
+            .unwrap_or(0)
     }
 
     /// Advance and return the transaction number for a session
     pub fn advance_txn_number(&self, handle: u64) -> i64 {
-        self.with_session_mut(handle, |s| s.advance_txn_number()).unwrap_or(0)
+        self.with_session_mut(handle, |s| s.advance_txn_number())
+            .unwrap_or(0)
     }
 
     /// Mark a session as dirty
@@ -174,4 +176,3 @@ impl Default for FfiSessionPool {
         Self::new()
     }
 }
-

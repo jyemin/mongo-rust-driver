@@ -22,11 +22,6 @@
 struct MongoClient;
 
 
-// Log level constants matching Java's LogMessage.Level
-#define LOG_LEVEL_DEBUG 0
-
-#define LOG_LEVEL_INFO 1
-
 #define ERROR_CATEGORY_COMMAND 0
 
 #define ERROR_CATEGORY_CONNECTION 1
@@ -36,6 +31,11 @@ struct MongoClient;
 #define ERROR_CATEGORY_AUTHENTICATION 3
 
 #define ERROR_CATEGORY_INTERNAL 4
+
+// Log level constants matching Java's LogMessage.Level
+#define LOG_LEVEL_DEBUG 0
+
+#define LOG_LEVEL_INFO 1
 
 // Command event type discriminant
 typedef enum CommandEventType {
@@ -182,13 +182,6 @@ typedef struct FfiCommandEvent {
 // cbindgen should translate Option<extern "C" fn(...)> to a nullable C function pointer
 typedef void (*CommandEventCallback)(const struct FfiCommandEvent *event);
 
-// Callback for single result operations
-//
-// # Parameters
-// * `success` - Whether the operation succeeded
-// * `data` - BSON bytes for the result (if success=true) or error (if success=false)
-typedef void (*SingleResultCallback)(bool success, const struct BsonBytes *data);
-
 // Operation context passed across FFI boundary
 // Contains session, transaction, and retryability information
 typedef struct OperationContext {
@@ -209,6 +202,13 @@ typedef struct OperationContext {
   // Read concern level (nullable, null-terminated C string)
   const char *read_concern_level;
 } OperationContext;
+
+// Callback for single result operations
+//
+// # Parameters
+// * `success` - Whether the operation succeeded
+// * `data` - BSON bytes for the result (if success=true) or error (if success=false)
+typedef void (*SingleResultCallback)(bool success, const struct BsonBytes *data);
 
 // Callback for cursor operations
 //
@@ -292,20 +292,6 @@ struct MongoClient *mongo_client_new(const struct ConnectionSettings *connection
 
 // Destroy a MongoDB client
 void mongo_client_destroy(struct MongoClient *client);
-
-// Enable timing (call from Java via FFI)
-void mongo_enable_timing(bool enabled);
-
-// No-op FFI function to measure pure FFI overhead (spawn + callback, no MongoDB)
-void mongo_ffi_overhead_test(struct MongoClient *client,
-                             const struct BsonBytes *input,
-                             SingleResultCallback callback);
-
-// Print FFI overhead stats
-void mongo_print_ffi_overhead_stats(void);
-
-// Print timing stats to stderr
-void mongo_print_timing_stats(void);
 
 // Execute a command using session handle (matches JNI executeCommandAsync).
 // Rust looks up the session by handle and manages lsid/txnNumber internally.

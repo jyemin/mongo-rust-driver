@@ -1,8 +1,8 @@
 // Core types for FFI boundary
 
-use std::sync::Arc;
-use super::session::FfiSessionPool;
 use super::cursor::CursorManager;
+use super::session::FfiSessionPool;
+use std::sync::Arc;
 
 /// Raw BSON bytes passed across FFI boundary
 #[repr(C)]
@@ -47,12 +47,8 @@ pub type SingleResultCallback = extern "C" fn(success: bool, data: *const BsonBy
 /// * `cursor_handle` - Handle to the cursor (0 on error)
 /// * `exhausted` - Whether the cursor is exhausted (no more batches)
 /// * `data` - BSON bytes for the batch (firstBatch or nextBatch)
-pub type CursorResultCallback = extern "C" fn(
-    success: bool,
-    cursor_handle: u64,
-    exhausted: bool,
-    data: *const BsonBytes,
-);
+pub type CursorResultCallback =
+    extern "C" fn(success: bool, cursor_handle: u64, exhausted: bool, data: *const BsonBytes);
 
 /// Callback for getMore operations
 ///
@@ -60,11 +56,8 @@ pub type CursorResultCallback = extern "C" fn(
 /// * `success` - Whether the operation succeeded
 /// * `exhausted` - Whether the cursor is exhausted (no more batches)
 /// * `data` - BSON bytes for the nextBatch
-pub type GetMoreResultCallback = extern "C" fn(
-    success: bool,
-    exhausted: bool,
-    data: *const BsonBytes,
-);
+pub type GetMoreResultCallback =
+    extern "C" fn(success: bool, exhausted: bool, data: *const BsonBytes);
 
 /// Opaque client handle
 /// Contains the actual MongoDB Rust driver client, session pool, and cursor manager
@@ -79,4 +72,3 @@ pub struct MongoClient {
 // Note: When MongoClient is dropped, the runtime will be dropped automatically.
 // The Tokio runtime's Drop implementation will wait for spawned tasks to complete,
 // ensuring graceful shutdown of any in-flight operations.
-

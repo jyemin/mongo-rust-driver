@@ -1,8 +1,8 @@
 // Shared core logic used by both JNI and FFI entry points.
 // This module contains business logic that is independent of the FFI mechanism.
 
-use crate::bson::{doc, Bson, Document, RawDocumentBuf};
 use super::session::FfiSessionPool;
+use crate::bson::{doc, Bson, Document, RawDocumentBuf};
 
 // ============================================================================
 // Error Category Constants (must match RustError.CATEGORY_* in Java)
@@ -21,7 +21,7 @@ pub const ERROR_CATEGORY_INTERNAL: i32 = 4;
 /// Parameters for command execution, independent of FFI mechanism.
 #[derive(Debug, Clone)]
 pub struct OperationParams {
-    pub retryability: u8,  // 0=None, 1=Read, 2=Write
+    pub retryability: u8, // 0=None, 1=Read, 2=Write
     pub session_handle: u64,
     pub in_transaction: bool,
     pub start_transaction: bool,
@@ -69,23 +69,44 @@ pub fn to_retryability(value: u8) -> crate::Retryability {
 pub fn serialize_mongodb_error(error: &crate::error::Error) -> Vec<u8> {
     // Determine error category and extract details based on error kind
     let (category, code, code_name, message) = match error.kind.as_ref() {
-        crate::error::ErrorKind::Command(cmd_err) => {
-            (ERROR_CATEGORY_COMMAND, cmd_err.code, cmd_err.code_name.clone(), cmd_err.message.clone())
-        }
-        crate::error::ErrorKind::ServerSelection { message, .. } => {
-            (ERROR_CATEGORY_SERVER_SELECTION, -1, String::new(), message.clone())
-        }
-        crate::error::ErrorKind::Authentication { message, .. } => {
-            (ERROR_CATEGORY_AUTHENTICATION, -1, String::new(), message.clone())
-        }
-        crate::error::ErrorKind::ConnectionPoolCleared { message, .. } => {
-            (ERROR_CATEGORY_CONNECTION, -1, String::new(), message.clone())
-        }
-        _ => (ERROR_CATEGORY_INTERNAL, -1, String::new(), error.to_string()),
+        crate::error::ErrorKind::Command(cmd_err) => (
+            ERROR_CATEGORY_COMMAND,
+            cmd_err.code,
+            cmd_err.code_name.clone(),
+            cmd_err.message.clone(),
+        ),
+        crate::error::ErrorKind::ServerSelection { message, .. } => (
+            ERROR_CATEGORY_SERVER_SELECTION,
+            -1,
+            String::new(),
+            message.clone(),
+        ),
+        crate::error::ErrorKind::Authentication { message, .. } => (
+            ERROR_CATEGORY_AUTHENTICATION,
+            -1,
+            String::new(),
+            message.clone(),
+        ),
+        crate::error::ErrorKind::ConnectionPoolCleared { message, .. } => (
+            ERROR_CATEGORY_CONNECTION,
+            -1,
+            String::new(),
+            message.clone(),
+        ),
+        _ => (
+            ERROR_CATEGORY_INTERNAL,
+            -1,
+            String::new(),
+            error.to_string(),
+        ),
     };
 
     // Extract labels
-    let labels: Vec<Bson> = error.labels().iter().map(|s| Bson::String(s.clone())).collect();
+    let labels: Vec<Bson> = error
+        .labels()
+        .iter()
+        .map(|s| Bson::String(s.clone()))
+        .collect();
 
     // Build BSON document with error info
     let mut error_doc = doc! {
@@ -202,9 +223,9 @@ pub fn prepare_cursor_command_with_session(
 
     // Store session info for getMore operations (needed for ALL sessions, not just transactions)
     let external_session_info: Option<(RawDocumentBuf, Option<i64>)> = if has_session {
-        let lsid = session_pool.get_session_lsid(params.session_handle).and_then(|lsid_doc| {
-            RawDocumentBuf::from_document(&lsid_doc).ok()
-        });
+        let lsid = session_pool
+            .get_session_lsid(params.session_handle)
+            .and_then(|lsid_doc| RawDocumentBuf::from_document(&lsid_doc).ok());
         let txn_number = if params.in_transaction {
             Some(session_pool.get_txn_number(params.session_handle) as i64)
         } else {
@@ -249,4 +270,3 @@ pub fn extract_comment(command_bytes: &[u8]) -> Option<Bson> {
         None
     }
 }
-
