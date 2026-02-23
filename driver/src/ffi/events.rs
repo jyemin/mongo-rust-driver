@@ -1,9 +1,9 @@
 // Command event types for FFI boundary
 
+use super::types::BsonBytes;
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::sync::atomic::{AtomicI64, Ordering};
-use super::types::BsonBytes;
 
 /// Global atomic counter for generating operation IDs
 /// The Rust MongoDB driver doesn't provide operationId, so we generate it ourselves
@@ -87,17 +87,28 @@ impl Default for FfiCommandEvent {
             connection: FfiConnectionInfo::default(),
             database: std::ptr::null(),
             command_name: std::ptr::null(),
-            command: BsonBytes { data: std::ptr::null(), len: 0 },
-            response: BsonBytes { data: std::ptr::null(), len: 0 },
+            command: BsonBytes {
+                data: std::ptr::null(),
+                len: 0,
+            },
+            response: BsonBytes {
+                data: std::ptr::null(),
+                len: 0,
+            },
             elapsed_nanos: 0,
             error_message: std::ptr::null(),
         }
     }
 }
 
-/// Callback type for command events
+/// Callback function type for command events (non-nullable)
+/// This is the actual function signature that Java implements
+pub type CommandEventCallbackFn = extern "C" fn(event: *const FfiCommandEvent);
+
+/// Nullable callback type for command events
 /// Java implements this and passes to Rust during client creation
-pub type CommandEventCallback = extern "C" fn(event: *const FfiCommandEvent);
+/// cbindgen should translate Option<extern "C" fn(...)> to a nullable C function pointer
+pub type CommandEventCallback = Option<extern "C" fn(event: *const FfiCommandEvent)>;
 
 /// Generate a new unique operation ID
 pub fn generate_operation_id() -> i64 {
@@ -115,10 +126,12 @@ pub fn generate_operation_id() -> i64 {
 /// The callback must remain valid for the lifetime of the EventHandler.
 /// The callback is called synchronously, so any data pointed to by FfiCommandEvent
 /// is only valid during the callback invocation.
+/// Note: This function takes the unwrapped function type (not Option), as the caller
+/// has already verified the callback is Some.
 pub fn create_command_event_handler(
-    callback: CommandEventCallback,
+    callback: CommandEventCallbackFn,
 ) -> crate::event::EventHandler<crate::event::command::CommandEvent> {
-    use crate::event::{EventHandler, command::CommandEvent};
+    use crate::event::{command::CommandEvent, EventHandler};
 
     // Generate a shared operation ID for this handler
     // NOTE: In a real implementation, we'd want to track request_id -> operation_id mapping
@@ -139,7 +152,7 @@ pub fn create_command_event_handler(
 /// Convert CommandStartedEvent to FfiCommandEvent and invoke callback
 fn convert_started_event(
     event: &crate::event::command::CommandStartedEvent,
-    callback: CommandEventCallback,
+    callback: CommandEventCallbackFn,
 ) {
     // Prepare strings - these must live until after the callback returns
     let db_cstring = CString::new(event.db.as_str()).unwrap_or_default();
@@ -150,7 +163,8 @@ fn convert_started_event(
     let command_bytes: Vec<u8> = crate::bson::to_vec(&event.command).unwrap_or_default();
 
     // Build connection info
-    let connection_info = build_connection_info(&event.connection, &event.service_id, &host_cstring);
+    let connection_info =
+        build_connection_info(&event.connection, &event.service_id, &host_cstring);
 
     // Build the FFI event
     let ffi_event = FfiCommandEvent {
@@ -162,9 +176,12 @@ fn convert_started_event(
         command_name: cmd_name_cstring.as_ptr(),
         command: BsonBytes {
             data: command_bytes.as_ptr(),
-            len: command_bytes.len()
+            len: command_bytes.len(),
         },
-        response: BsonBytes { data: std::ptr::null(), len: 0 },
+        response: BsonBytes {
+            data: std::ptr::null(),
+            len: 0,
+        },
         elapsed_nanos: 0,
         error_message: std::ptr::null(),
     };
@@ -179,7 +196,7 @@ fn convert_started_event(
 /// NOTE: CommandSucceededEvent doesn't have a `db` field - we pass empty string
 fn convert_succeeded_event(
     event: &crate::event::command::CommandSucceededEvent,
-    callback: CommandEventCallback,
+    callback: CommandEventCallbackFn,
 ) {
     // Prepare strings - NOTE: db is not available in CommandSucceededEvent
     let db_cstring = CString::new("").unwrap_or_default();
@@ -190,7 +207,8 @@ fn convert_succeeded_event(
     let reply_bytes: Vec<u8> = crate::bson::to_vec(&event.reply).unwrap_or_default();
 
     // Build connection info
-    let connection_info = build_connection_info(&event.connection, &event.service_id, &host_cstring);
+    let connection_info =
+        build_connection_info(&event.connection, &event.service_id, &host_cstring);
 
     // Build the FFI event
     let ffi_event = FfiCommandEvent {
@@ -200,10 +218,13 @@ fn convert_succeeded_event(
         connection: connection_info,
         database: db_cstring.as_ptr(),
         command_name: cmd_name_cstring.as_ptr(),
-        command: BsonBytes { data: std::ptr::null(), len: 0 },
+        command: BsonBytes {
+            data: std::ptr::null(),
+            len: 0,
+        },
         response: BsonBytes {
             data: reply_bytes.as_ptr(),
-            len: reply_bytes.len()
+            len: reply_bytes.len(),
         },
         elapsed_nanos: event.duration.as_nanos() as i64,
         error_message: std::ptr::null(),
@@ -217,7 +238,7 @@ fn convert_succeeded_event(
 /// NOTE: CommandFailedEvent doesn't have a `db` field - we pass empty string
 fn convert_failed_event(
     event: &crate::event::command::CommandFailedEvent,
-    callback: CommandEventCallback,
+    callback: CommandEventCallbackFn,
 ) {
     // Prepare strings - NOTE: db is not available in CommandFailedEvent
     let db_cstring = CString::new("").unwrap_or_default();
@@ -226,7 +247,8 @@ fn convert_failed_event(
     let error_cstring = CString::new(event.failure.to_string()).unwrap_or_default();
 
     // Build connection info
-    let connection_info = build_connection_info(&event.connection, &event.service_id, &host_cstring);
+    let connection_info =
+        build_connection_info(&event.connection, &event.service_id, &host_cstring);
 
     // Build the FFI event
     let ffi_event = FfiCommandEvent {
@@ -236,8 +258,14 @@ fn convert_failed_event(
         connection: connection_info,
         database: db_cstring.as_ptr(),
         command_name: cmd_name_cstring.as_ptr(),
-        command: BsonBytes { data: std::ptr::null(), len: 0 },
-        response: BsonBytes { data: std::ptr::null(), len: 0 },
+        command: BsonBytes {
+            data: std::ptr::null(),
+            len: 0,
+        },
+        response: BsonBytes {
+            data: std::ptr::null(),
+            len: 0,
+        },
         elapsed_nanos: event.duration.as_nanos() as i64,
         error_message: error_cstring.as_ptr(),
     };
@@ -339,6 +367,9 @@ mod tests {
         // Check that we received events
         let count = EVENT_COUNT.load(AtomicOrdering::SeqCst);
         println!("Total events received: {}", count);
-        assert!(count >= 2, "Should have received at least Started and Succeeded events");
+        assert!(
+            count >= 2,
+            "Should have received at least Started and Succeeded events"
+        );
     }
 }

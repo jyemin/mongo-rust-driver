@@ -46,7 +46,8 @@ pub type LogCallback = extern "C" fn(event: *const FfiLogEvent);
 
 /// Callback type for log events (JNI)
 /// Function pointer that takes Rust strings and invokes Java via JNI
-pub type JniLogCallback = fn(level: i32, target: &str, message: &str, field_names: &[&str], field_values: &[&str]);
+pub type JniLogCallback =
+    fn(level: i32, target: &str, message: &str, field_names: &[&str], field_values: &[&str]);
 
 /// Global C FFI log callback (set once via init_logging)
 static GLOBAL_LOG_CALLBACK: RwLock<Option<LogCallback>> = RwLock::new(None);
@@ -98,12 +99,7 @@ fn get_jni_callback() -> Option<JniLogCallback> {
 }
 
 /// Send a log event to the global callback (either C FFI or JNI)
-fn send_log_event(
-    level: i32,
-    target: &str,
-    message: &str,
-    fields: &[(&str, &str)],
-) {
+fn send_log_event(level: i32, target: &str, message: &str, fields: &[(&str, &str)]) {
     // Try JNI callback first (simpler - no C string conversion needed)
     if let Some(jni_callback) = get_jni_callback() {
         let field_names: Vec<&str> = fields.iter().map(|(n, _)| *n).collect();
@@ -131,9 +127,7 @@ fn send_log_event(
     // Convert fields to FFI structures
     let field_cstrings: Vec<(CString, CString)> = fields
         .iter()
-        .filter_map(|(n, v)| {
-            Some((CString::new(*n).ok()?, CString::new(*v).ok()?))
-        })
+        .filter_map(|(n, v)| Some((CString::new(*n).ok()?, CString::new(*v).ok()?)))
         .collect();
 
     let ffi_fields: Vec<FfiLogField> = field_cstrings
@@ -197,15 +191,18 @@ impl Visit for FieldVisitor {
     }
 
     fn record_i64(&mut self, field: &Field, value: i64) {
-        self.fields.push((field.name().to_string(), value.to_string()));
+        self.fields
+            .push((field.name().to_string(), value.to_string()));
     }
 
     fn record_u64(&mut self, field: &Field, value: u64) {
-        self.fields.push((field.name().to_string(), value.to_string()));
+        self.fields
+            .push((field.name().to_string(), value.to_string()));
     }
 
     fn record_bool(&mut self, field: &Field, value: bool) {
-        self.fields.push((field.name().to_string(), value.to_string()));
+        self.fields
+            .push((field.name().to_string(), value.to_string()));
     }
 }
 
@@ -225,16 +222,17 @@ fn get_configured_level_for_target(target: &str) -> i32 {
 
     // Match target to component index
     // levels[0]=command, [1]=connection, [2]=server_selection, [3]=topology
-    if target.starts_with("crate::command") {
+    // Tracing targets are "mongodb::*" (the crate name)
+    if target.starts_with("mongodb::command") {
         levels[0]
-    } else if target.starts_with("crate::connection") {
+    } else if target.starts_with("mongodb::connection") {
         levels[1]
-    } else if target.starts_with("crate::server_selection") {
+    } else if target.starts_with("mongodb::server_selection") {
         levels[2]
-    } else if target.starts_with("crate::topology") {
+    } else if target.starts_with("mongodb::topology") {
         levels[3]
     } else {
-        // Unknown crate::* target - default to INFO
+        // Unknown mongodb::* target - default to INFO
         1
     }
 }
@@ -247,8 +245,8 @@ where
         let metadata = event.metadata();
         let target = metadata.target();
 
-        // Only process crate::* events
-        if !target.starts_with("crate::") {
+        // Only process mongodb crate events (tracing target is "mongodb::*")
+        if !target.starts_with("mongodb") {
             return;
         }
 
@@ -306,7 +304,12 @@ fn store_log_levels(
     topology_level: i32,
 ) {
     if let Ok(mut levels) = CURRENT_LOG_LEVELS.write() {
-        *levels = [command_level, connection_level, server_selection_level, topology_level];
+        *levels = [
+            command_level,
+            connection_level,
+            server_selection_level,
+            topology_level,
+        ];
     }
 }
 
@@ -328,7 +331,12 @@ pub fn init_logging(
     set_global_log_callback(callback);
 
     // Store the initial log levels for runtime filtering
-    store_log_levels(command_level, connection_level, server_selection_level, topology_level);
+    store_log_levels(
+        command_level,
+        connection_level,
+        server_selection_level,
+        topology_level,
+    );
 
     // Initialize the tracing subscriber (only runs once)
     INIT_TRACING.call_once(|| {
@@ -365,7 +373,12 @@ pub fn init_logging_with_jni_callback(
     }
 
     // Store the initial log levels for runtime filtering
-    store_log_levels(command_level, connection_level, server_selection_level, topology_level);
+    store_log_levels(
+        command_level,
+        connection_level,
+        server_selection_level,
+        topology_level,
+    );
 
     // Initialize the tracing subscriber (only runs once)
     INIT_TRACING.call_once(|| {
@@ -398,5 +411,10 @@ pub fn update_log_levels(
     server_selection_level: i32,
     topology_level: i32,
 ) {
-    store_log_levels(command_level, connection_level, server_selection_level, topology_level);
+    store_log_levels(
+        command_level,
+        connection_level,
+        server_selection_level,
+        topology_level,
+    );
 }

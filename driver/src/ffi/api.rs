@@ -1,13 +1,13 @@
 // FFI functions exposed to Java via JNA/FFM
 
+use super::events::{create_command_event_handler, CommandEventCallback};
+#[cfg(feature = "tracing-unstable")]
+use super::logging::{init_logging, update_log_levels, LogCallback};
+use super::settings::*;
+use super::types::*;
+use crate::options::{ClientOptions, Credential, ServerAddress};
 use std::ffi::CStr;
 use std::os::raw::c_char;
-use super::types::*;
-use super::settings::*;
-use super::events::{CommandEventCallback, create_command_event_handler};
-#[cfg(feature = "tracing-unstable")]
-use super::logging::{LogCallback, init_logging, update_log_levels};
-use crate::options::{ClientOptions, ServerAddress, Credential};
 
 // ============================================================================
 // Session Management Functions (for FFM)
@@ -36,7 +36,10 @@ pub extern "C" fn mongo_session_release(client: *mut MongoClient, session_handle
 
 /// Get the transaction number for a session.
 #[no_mangle]
-pub extern "C" fn mongo_session_get_txn_number(client: *mut MongoClient, session_handle: u64) -> i64 {
+pub extern "C" fn mongo_session_get_txn_number(
+    client: *mut MongoClient,
+    session_handle: u64,
+) -> i64 {
     if client.is_null() || session_handle == 0 {
         return 0;
     }
@@ -46,7 +49,10 @@ pub extern "C" fn mongo_session_get_txn_number(client: *mut MongoClient, session
 
 /// Advance the transaction number and return the new value.
 #[no_mangle]
-pub extern "C" fn mongo_session_advance_txn_number(client: *mut MongoClient, session_handle: u64) -> i64 {
+pub extern "C" fn mongo_session_advance_txn_number(
+    client: *mut MongoClient,
+    session_handle: u64,
+) -> i64 {
     if client.is_null() || session_handle == 0 {
         return 0;
     }
@@ -68,9 +74,15 @@ pub extern "C" fn mongo_session_mark_dirty(client: *mut MongoClient, session_han
 /// Caller must call mongo_free_bytes on the returned data when done.
 /// Returns BsonBytes with null data if session not found.
 #[no_mangle]
-pub extern "C" fn mongo_session_get_lsid(client: *mut MongoClient, session_handle: u64) -> BsonBytes {
+pub extern "C" fn mongo_session_get_lsid(
+    client: *mut MongoClient,
+    session_handle: u64,
+) -> BsonBytes {
     if client.is_null() || session_handle == 0 {
-        return BsonBytes { data: std::ptr::null(), len: 0 };
+        return BsonBytes {
+            data: std::ptr::null(),
+            len: 0,
+        };
     }
     let mongo_client = unsafe { &*client };
 
@@ -84,7 +96,10 @@ pub extern "C" fn mongo_session_get_lsid(client: *mut MongoClient, session_handl
             return BsonBytes { data, len };
         }
     }
-    BsonBytes { data: std::ptr::null(), len: 0 }
+    BsonBytes {
+        data: std::ptr::null(),
+        len: 0,
+    }
 }
 
 /// Free bytes allocated by Rust (e.g., from mongo_session_get_lsid).
@@ -113,7 +128,13 @@ pub extern "C" fn mongo_init_logging(
     topology_level: i32,
     callback: LogCallback,
 ) {
-    init_logging(callback, command_level, connection_level, server_selection_level, topology_level);
+    init_logging(
+        callback,
+        command_level,
+        connection_level,
+        server_selection_level,
+        topology_level,
+    );
 }
 
 /// Update log levels at runtime.
@@ -131,7 +152,12 @@ pub extern "C" fn mongo_update_log_levels(
     server_selection_level: i32,
     topology_level: i32,
 ) {
-    update_log_levels(command_level, connection_level, server_selection_level, topology_level);
+    update_log_levels(
+        command_level,
+        connection_level,
+        server_selection_level,
+        topology_level,
+    );
 }
 
 /// Create a new MongoDB client with settings structs
@@ -160,16 +186,20 @@ pub extern "C" fn mongo_client_new(
 
     // Build ClientOptions from settings
     let client_options = unsafe {
-        match build_client_options(connection_settings, auth_settings, tls_settings, max_document_length, command_event_callback) {
+        match build_client_options(
+            connection_settings,
+            auth_settings,
+            tls_settings,
+            max_document_length,
+            command_event_callback,
+        ) {
             Ok(opts) => opts,
             Err(_) => return std::ptr::null_mut(),
         }
     };
 
     // Create client within the runtime context
-    let client = runtime.block_on(async {
-        crate::Client::with_options(client_options)
-    });
+    let client = runtime.block_on(async { crate::Client::with_options(client_options) });
 
     let client = match client {
         Ok(c) => c,
@@ -186,7 +216,7 @@ pub extern "C" fn mongo_client_new(
 }
 
 /// Build ClientOptions from settings structs
-/// Note: command_event_callback is a nullable function pointer (NULL = no callback)
+/// Note: command_event_callback is CommandEventCallback (which is Option<fn>) - None means no callback
 unsafe fn build_client_options(
     connection_settings: *const ConnectionSettings,
     auth_settings: *const AuthSettings,
@@ -199,15 +229,15 @@ unsafe fn build_client_options(
     // Start with default options
     let mut options = ClientOptions::default();
 
-    // Wire up command event handler if callback was provided (non-null function pointer)
-    // In C, function pointers can be null - we check by casting to usize and comparing to 0
-    if (command_event_callback as usize) != 0 {
-        options.command_event_handler = Some(create_command_event_handler(command_event_callback));
+    // Wire up command event handler if callback was provided (CommandEventCallback is Option<fn>)
+    if let Some(callback) = command_event_callback {
+        options.command_event_handler = Some(create_command_event_handler(callback));
     }
 
     // Apply connection settings
     let hosts = conn_settings.get_hosts();
-    options.hosts = hosts.iter()
+    options.hosts = hosts
+        .iter()
         .filter_map(|h| h.parse::<ServerAddress>().ok())
         .collect();
 
@@ -219,7 +249,9 @@ unsafe fn build_client_options(
         options.repl_set_name = Some(repl_set);
     }
 
-    if let Some(srv_service) = ConnectionSettings::get_optional_string(conn_settings.srv_service_name) {
+    if let Some(srv_service) =
+        ConnectionSettings::get_optional_string(conn_settings.srv_service_name)
+    {
         options.srv_service_name = Some(srv_service);
     }
 
@@ -227,15 +259,20 @@ unsafe fn build_client_options(
         options.srv_max_hosts = Some(conn_settings.srv_max_hosts);
     }
 
-    if let Some(timeout) = ConnectionSettings::get_optional_duration_ms(conn_settings.server_selection_timeout_ms) {
+    if let Some(timeout) =
+        ConnectionSettings::get_optional_duration_ms(conn_settings.server_selection_timeout_ms)
+    {
         options.server_selection_timeout = Some(timeout);
     }
 
-    if let Some(threshold) = ConnectionSettings::get_optional_duration_ms(conn_settings.local_threshold_ms) {
+    if let Some(threshold) =
+        ConnectionSettings::get_optional_duration_ms(conn_settings.local_threshold_ms)
+    {
         options.local_threshold = Some(threshold);
     }
 
-    if let Some(load_balanced) = ConnectionSettings::get_optional_bool(conn_settings.load_balanced) {
+    if let Some(load_balanced) = ConnectionSettings::get_optional_bool(conn_settings.load_balanced)
+    {
         options.load_balanced = Some(load_balanced);
     }
 
@@ -276,7 +313,9 @@ unsafe fn build_client_options(
             let mut tls_opts = Tls::Enabled(Default::default());
 
             if let Tls::Enabled(ref mut opts) = tls_opts {
-                if let Some(allow_invalid_certs) = ConnectionSettings::get_optional_bool(tls.allow_invalid_certificates) {
+                if let Some(allow_invalid_certs) =
+                    ConnectionSettings::get_optional_bool(tls.allow_invalid_certificates)
+                {
                     opts.allow_invalid_certificates = Some(allow_invalid_certs);
                 }
 
@@ -287,7 +326,9 @@ unsafe fn build_client_options(
                     opts.ca_file_path = Some(ca_file.into());
                 }
 
-                if let Some(cert_key_file) = ConnectionSettings::get_optional_string(tls.cert_key_file_path) {
+                if let Some(cert_key_file) =
+                    ConnectionSettings::get_optional_string(tls.cert_key_file_path)
+                {
                     opts.cert_key_file_path = Some(cert_key_file.into());
                 }
             }
@@ -306,14 +347,16 @@ pub extern "C" fn mongo_client_destroy(client: *mut MongoClient) {
         unsafe {
             let mongo_client = Box::from_raw(client);
             // Shutdown the runtime gracefully, waiting up to 5 seconds for tasks to complete
-            mongo_client.runtime.shutdown_timeout(std::time::Duration::from_secs(5));
+            mongo_client
+                .runtime
+                .shutdown_timeout(std::time::Duration::from_secs(5));
             // mongo_client.client is dropped here
         }
     }
 }
 
 // Timing stats for performance analysis
-use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 static TIMING_ENABLED: AtomicBool = AtomicBool::new(false);
 static TIMING_TOTAL_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -342,7 +385,10 @@ pub extern "C" fn mongo_ffi_overhead_test(
     let start = std::time::Instant::now();
 
     if client.is_null() || input.is_null() {
-        let empty = BsonBytes { data: std::ptr::null(), len: 0 };
+        let empty = BsonBytes {
+            data: std::ptr::null(),
+            len: 0,
+        };
         callback(false, &empty);
         return;
     }
@@ -384,7 +430,10 @@ pub extern "C" fn mongo_print_ffi_overhead_stats() {
     let nanos = FFI_OVERHEAD_NANOS.load(Ordering::SeqCst);
     eprintln!("\n=== Pure FFI Overhead Stats ===");
     eprintln!("Total calls: {}", calls);
-    eprintln!("Avg round-trip (spawn+callback, no MongoDB): {:.3} ms", (nanos as f64) / 1_000_000.0 / (calls as f64));
+    eprintln!(
+        "Avg round-trip (spawn+callback, no MongoDB): {:.3} ms",
+        (nanos as f64) / 1_000_000.0 / (calls as f64)
+    );
 }
 
 /// Print timing stats to stderr
@@ -401,10 +450,22 @@ pub extern "C" fn mongo_print_timing_stats() {
 
     eprintln!("\n=== Rust FFI Timing Stats ===");
     eprintln!("Total calls: {}", calls);
-    eprintln!("Avg parse args: {:.3} ms", (parse_ns as f64) / 1_000_000.0 / (calls as f64));
-    eprintln!("Avg spawn overhead: {:.3} ms", (spawn_ns as f64) / 1_000_000.0 / (calls as f64));
-    eprintln!("Avg MongoDB op: {:.3} ms", (mongo_ns as f64) / 1_000_000.0 / (calls as f64));
-    eprintln!("Avg callback (serialize+call): {:.3} ms", (callback_ns as f64) / 1_000_000.0 / (calls as f64));
+    eprintln!(
+        "Avg parse args: {:.3} ms",
+        (parse_ns as f64) / 1_000_000.0 / (calls as f64)
+    );
+    eprintln!(
+        "Avg spawn overhead: {:.3} ms",
+        (spawn_ns as f64) / 1_000_000.0 / (calls as f64)
+    );
+    eprintln!(
+        "Avg MongoDB op: {:.3} ms",
+        (mongo_ns as f64) / 1_000_000.0 / (calls as f64)
+    );
+    eprintln!(
+        "Avg callback (serialize+call): {:.3} ms",
+        (callback_ns as f64) / 1_000_000.0 / (calls as f64)
+    );
 }
 
 // ============================================================================
@@ -433,7 +494,10 @@ pub extern "C" fn mongo_execute_command(
 ) {
     if client.is_null() || database.is_null() || command.is_null() {
         let error_msg = b"Invalid parameters";
-        let error_bytes = BsonBytes { data: error_msg.as_ptr(), len: error_msg.len() };
+        let error_bytes = BsonBytes {
+            data: error_msg.as_ptr(),
+            len: error_msg.len(),
+        };
         callback(false, &error_bytes);
         return;
     }
@@ -441,16 +505,17 @@ pub extern "C" fn mongo_execute_command(
     let mongo_client = unsafe { &*client };
 
     // Parse database name
-    let db_name = unsafe {
-        CStr::from_ptr(database).to_string_lossy().into_owned()
-    };
+    let db_name = unsafe { CStr::from_ptr(database).to_string_lossy().into_owned() };
 
     // Get raw BSON command bytes
     let command_bytes = unsafe {
         let bson_bytes = &*command;
         if bson_bytes.data.is_null() || bson_bytes.len == 0 {
             let error_msg = b"Empty command";
-            let error_bytes = BsonBytes { data: error_msg.as_ptr(), len: error_msg.len() };
+            let error_bytes = BsonBytes {
+                data: error_msg.as_ptr(),
+                len: error_msg.len(),
+            };
             callback(false, &error_bytes);
             return;
         }
@@ -469,7 +534,10 @@ pub extern "C" fn mongo_execute_command(
         Ok(result) => result,
         Err(e) => {
             let error_bytes = e.as_bytes();
-            let bson_bytes = BsonBytes { data: error_bytes.as_ptr(), len: error_bytes.len() };
+            let bson_bytes = BsonBytes {
+                data: error_bytes.as_ptr(),
+                len: error_bytes.len(),
+            };
             callback(false, &bson_bytes);
             return;
         }
@@ -480,14 +548,21 @@ pub extern "C" fn mongo_execute_command(
 
     // Spawn async task using shared ops function
     mongo_client.runtime.spawn(async move {
-        let result = ops::execute_command(&client_clone, &db_name, command_raw, retry, has_session).await;
+        let result =
+            ops::execute_command(&client_clone, &db_name, command_raw, retry, has_session).await;
         match result {
             Ok(bytes) => {
-                let bson_bytes = BsonBytes { data: bytes.as_ptr(), len: bytes.len() };
+                let bson_bytes = BsonBytes {
+                    data: bytes.as_ptr(),
+                    len: bytes.len(),
+                };
                 callback(true, &bson_bytes);
             }
             Err(error_bytes) => {
-                let bson_bytes = BsonBytes { data: error_bytes.as_ptr(), len: error_bytes.len() };
+                let bson_bytes = BsonBytes {
+                    data: error_bytes.as_ptr(),
+                    len: error_bytes.len(),
+                };
                 callback(false, &bson_bytes);
             }
         }
@@ -504,7 +579,11 @@ fn context_to_params(context: *const OperationContext) -> OperationParams {
     let read_concern_level = if ctx.read_concern_level.is_null() {
         None
     } else {
-        Some(unsafe { CStr::from_ptr(ctx.read_concern_level).to_string_lossy().into_owned() })
+        Some(unsafe {
+            CStr::from_ptr(ctx.read_concern_level)
+                .to_string_lossy()
+                .into_owned()
+        })
     };
 
     OperationParams {
@@ -544,7 +623,10 @@ pub extern "C" fn mongo_execute_cursor_command(
 ) {
     if client.is_null() || database.is_null() || command.is_null() {
         let error_msg = b"Invalid parameters";
-        let error_bytes = BsonBytes { data: error_msg.as_ptr(), len: error_msg.len() };
+        let error_bytes = BsonBytes {
+            data: error_msg.as_ptr(),
+            len: error_msg.len(),
+        };
         callback(false, 0, false, &error_bytes);
         return;
     }
@@ -552,16 +634,17 @@ pub extern "C" fn mongo_execute_cursor_command(
     let mongo_client = unsafe { &*client };
 
     // Parse database name
-    let db_name = unsafe {
-        CStr::from_ptr(database).to_string_lossy().into_owned()
-    };
+    let db_name = unsafe { CStr::from_ptr(database).to_string_lossy().into_owned() };
 
     // Get raw BSON command bytes
     let command_bytes = unsafe {
         let bson_bytes = &*command;
         if bson_bytes.data.is_null() || bson_bytes.len == 0 {
             let error_msg = b"Empty command";
-            let error_bytes = BsonBytes { data: error_msg.as_ptr(), len: error_msg.len() };
+            let error_bytes = BsonBytes {
+                data: error_msg.as_ptr(),
+                len: error_msg.len(),
+            };
             callback(false, 0, false, &error_bytes);
             return;
         }
@@ -575,22 +658,30 @@ pub extern "C" fn mongo_execute_cursor_command(
     let comment = core::extract_comment(&command_bytes);
 
     // Prepare cursor command with session/txn fields using shared core logic
-    let (command_raw, has_session, external_session_info) = match core::prepare_cursor_command_with_session(
-        command_bytes,
-        &params,
-        &mongo_client.session_pool,
-    ) {
-        Ok(result) => result,
-        Err(e) => {
-            let error_bytes = e.as_bytes();
-            let bson_bytes = BsonBytes { data: error_bytes.as_ptr(), len: error_bytes.len() };
-            callback(false, 0, false, &bson_bytes);
-            return;
-        }
-    };
+    let (command_raw, has_session, external_session_info) =
+        match core::prepare_cursor_command_with_session(
+            command_bytes,
+            &params,
+            &mongo_client.session_pool,
+        ) {
+            Ok(result) => result,
+            Err(e) => {
+                let error_bytes = e.as_bytes();
+                let bson_bytes = BsonBytes {
+                    data: error_bytes.as_ptr(),
+                    len: error_bytes.len(),
+                };
+                callback(false, 0, false, &bson_bytes);
+                return;
+            }
+        };
 
     let retry = core::to_retryability(params.retryability);
-    let batch_size_opt: Option<u32> = if batch_size > 0 { Some(batch_size as u32) } else { None };
+    let batch_size_opt: Option<u32> = if batch_size > 0 {
+        Some(batch_size as u32)
+    } else {
+        None
+    };
     let client_clone = mongo_client.client.clone();
     let cursor_manager = mongo_client.cursor_manager.clone();
 
@@ -606,15 +697,22 @@ pub extern "C" fn mongo_execute_cursor_command(
             comment,
             external_session_info,
             &cursor_manager,
-        ).await;
+        )
+        .await;
 
         match result {
             Ok(r) => {
-                let bson_bytes = BsonBytes { data: r.first_batch_bytes.as_ptr(), len: r.first_batch_bytes.len() };
+                let bson_bytes = BsonBytes {
+                    data: r.first_batch_bytes.as_ptr(),
+                    len: r.first_batch_bytes.len(),
+                };
                 callback(true, r.cursor_handle, r.exhausted, &bson_bytes);
             }
             Err(error_bytes) => {
-                let bson_bytes = BsonBytes { data: error_bytes.as_ptr(), len: error_bytes.len() };
+                let bson_bytes = BsonBytes {
+                    data: error_bytes.as_ptr(),
+                    len: error_bytes.len(),
+                };
                 callback(false, 0, false, &bson_bytes);
             }
         }
@@ -636,7 +734,10 @@ pub extern "C" fn mongo_cursor_get_more(
 ) {
     if client.is_null() {
         let error_msg = b"Client is null";
-        let error_bytes = BsonBytes { data: error_msg.as_ptr(), len: error_msg.len() };
+        let error_bytes = BsonBytes {
+            data: error_msg.as_ptr(),
+            len: error_msg.len(),
+        };
         callback(false, false, &error_bytes);
         return;
     }
@@ -650,11 +751,17 @@ pub extern "C" fn mongo_cursor_get_more(
 
         match result {
             Ok(r) => {
-                let bson_bytes = BsonBytes { data: r.batch_bytes.as_ptr(), len: r.batch_bytes.len() };
+                let bson_bytes = BsonBytes {
+                    data: r.batch_bytes.as_ptr(),
+                    len: r.batch_bytes.len(),
+                };
                 callback(true, r.exhausted, &bson_bytes);
             }
             Err((error_bytes, _cursor_valid)) => {
-                let bson_bytes = BsonBytes { data: error_bytes.as_ptr(), len: error_bytes.len() };
+                let bson_bytes = BsonBytes {
+                    data: error_bytes.as_ptr(),
+                    len: error_bytes.len(),
+                };
                 callback(false, false, &bson_bytes);
             }
         }
@@ -676,7 +783,10 @@ pub extern "C" fn mongo_cursor_close(
 ) {
     if client.is_null() {
         let error_msg = b"Client is null";
-        let error_bytes = BsonBytes { data: error_msg.as_ptr(), len: error_msg.len() };
+        let error_bytes = BsonBytes {
+            data: error_msg.as_ptr(),
+            len: error_msg.len(),
+        };
         callback(false, &error_bytes);
         return;
     }
@@ -690,7 +800,9 @@ pub extern "C" fn mongo_cursor_close(
     // This happens synchronously via the RawBatchCursor Drop impl
 
     // Invoke success callback
-    let empty = BsonBytes { data: std::ptr::null(), len: 0 };
+    let empty = BsonBytes {
+        data: std::ptr::null(),
+        len: 0,
+    };
     callback(true, &empty);
 }
-

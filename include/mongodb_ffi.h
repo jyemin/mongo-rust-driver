@@ -177,8 +177,9 @@ typedef struct FfiCommandEvent {
   const char *error_message;
 } FfiCommandEvent;
 
-// Callback type for command events
+// Nullable callback type for command events
 // Java implements this and passes to Rust during client creation
+// cbindgen should translate Option<extern "C" fn(...)> to a nullable C function pointer
 typedef void (*CommandEventCallback)(const struct FfiCommandEvent *event);
 
 // Callback for single result operations

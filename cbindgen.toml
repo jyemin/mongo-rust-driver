@@ -46,3 +46,8 @@ rename_fields = "None"
 
 [parse]
 parse_deps = false
+
+# Map Option<fn pointer> to nullable C function pointer
+# Option<extern "C" fn(...)> has the same ABI as a nullable C function pointer
+[export.rename]
+"Option<CommandEventCallback>" = "CommandEventCallback"
