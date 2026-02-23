@@ -6,6 +6,7 @@ use crate::{
     bson_compat::RawResult,
     client::session::TransactionState,
     coll::options::CursorType,
+    cursor::raw_batch::{RawBatchCursor, SessionRawBatchCursor},
     db::options::{RunCommandOptions, RunCursorCommandOptions},
     error::{ErrorKind, Result},
     operation::{run_command, run_cursor_command, Retryability},
@@ -113,6 +114,26 @@ impl Database {
             command: Ok(command),
             options: None,
             session: ImplicitSession,
+        }
+    }
+
+    /// Runs a database-level command and returns a cursor that provides raw batches.
+    ///
+    /// This is the cursor equivalent of [`run_raw_command_raw`](Database::run_raw_command_raw).
+    /// It takes raw BSON input and returns raw BSON batches without deserialization.
+    /// Useful for FFI scenarios where raw bytes are needed.
+    ///
+    /// `await` will return d[`Result<RawBatchCursor>`].
+    #[deeplink]
+    #[options_doc(run_cursor_command)]
+    pub fn run_raw_cursor_command_raw(&self, command: RawDocumentBuf) -> RunCursorCommandRaw<'_> {
+        RunCursorCommandRaw {
+            db: self,
+            command: Ok(command),
+            options: None,
+            session: ImplicitSession,
+            retryability: Retryability::None,
+            skip_session_injection: false,
         }
     }
 }
@@ -421,5 +442,109 @@ impl<'a> RunCursorCommand<'a, ExplicitSession<'a>> {
     /// Execute this command, returning a cursor that provides results in zero-copy raw batches.
     pub async fn batch(self) -> Result<crate::raw_batch_cursor::SessionRawBatchCursor> {
         self.exec_generic().await
+    }
+}
+
+// ============================================================================
+// RunCursorCommandRaw - Raw cursor command for FFI
+// ============================================================================
+
+/// Run a cursor-returning command with raw bytes input and output.
+/// Create with [`Database::run_raw_cursor_command_raw`].
+#[must_use]
+pub struct RunCursorCommandRaw<'a, Session = ImplicitSession> {
+    db: &'a Database,
+    command: RawResult<RawDocumentBuf>,
+    options: Option<RunCursorCommandOptions>,
+    session: Session,
+    retryability: Retryability,
+    /// If true, the driver will not add session info (lsid, txnNumber, etc.) to the command.
+    /// Used when the command already contains session info from an external source (e.g., Java FFI).
+    skip_session_injection: bool,
+}
+
+#[option_setters(crate::db::options::RunCursorCommandOptions)]
+#[export_doc(run_cursor_command_raw, extra = [session])]
+impl<Session> RunCursorCommandRaw<'_, Session> {
+    /// Set the retryability level for this cursor command.
+    ///
+    /// By default, `run_raw_cursor_command_raw` uses `Retryability::None` (no retries).
+    /// Use this method to enable retryable reads for cursor-returning commands like find.
+    pub fn retryability(mut self, value: Retryability) -> Self {
+        self.retryability = value;
+        self
+    }
+
+    /// Set whether to skip session injection.
+    ///
+    /// When true, the driver will not add lsid, txnNumber, startTransaction, or autocommit
+    /// to the command. Use this when the command already contains session info from an
+    /// external source (e.g., Java FFI layer).
+    pub fn skip_session_injection(mut self, value: bool) -> Self {
+        self.skip_session_injection = value;
+        self
+    }
+}
+
+impl<'a> RunCursorCommandRaw<'a, ImplicitSession> {
+    /// Run the command using the provided [`ClientSession`].
+    pub fn session(
+        self,
+        value: impl Into<&'a mut ClientSession>,
+    ) -> RunCursorCommandRaw<'a, ExplicitSession<'a>> {
+        RunCursorCommandRaw {
+            db: self.db,
+            command: self.command,
+            options: self.options,
+            session: ExplicitSession(value.into()),
+            retryability: self.retryability,
+            skip_session_injection: self.skip_session_injection,
+        }
+    }
+}
+
+#[action_impl]
+impl<'a> Action for RunCursorCommandRaw<'a, ImplicitSession> {
+    type Future = RunCursorCommandRawFuture;
+
+    async fn execute(self) -> Result<RawBatchCursor> {
+        let selection_criteria = self
+            .options
+            .as_ref()
+            .and_then(|options| options.selection_criteria.clone());
+        let rcc =
+            run_command::RunCommand::new(self.db.clone(), self.command?, selection_criteria, None);
+        let mut rc_command = run_cursor_command::RunCursorCommand::new_with_options(
+            rcc,
+            self.options,
+            self.retryability,
+            self.skip_session_injection,
+        )?;
+        let client = self.db.client();
+        client.execute_cursor_operation(&mut rc_command, None).await
+    }
+}
+
+#[action_impl]
+impl<'a> Action for RunCursorCommandRaw<'a, ExplicitSession<'a>> {
+    type Future = RunCursorCommandRawSessionFuture;
+
+    async fn execute(self) -> Result<SessionRawBatchCursor> {
+        let selection_criteria = self
+            .options
+            .as_ref()
+            .and_then(|options| options.selection_criteria.clone());
+        let rcc =
+            run_command::RunCommand::new(self.db.clone(), self.command?, selection_criteria, None);
+        let mut rc_command = run_cursor_command::RunCursorCommand::new_with_options(
+            rcc,
+            self.options,
+            self.retryability,
+            self.skip_session_injection,
+        )?;
+        let client = self.db.client();
+        client
+            .execute_cursor_operation(&mut rc_command, Some(self.session.0))
+            .await
     }
 }

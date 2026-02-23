@@ -18,6 +18,9 @@ pub(crate) struct RunCommand<'conn> {
     command: RawDocumentBuf,
     selection_criteria: Option<SelectionCriteria>,
     pinned_connection: Option<&'conn PinnedConnectionHandle>,
+    /// If true, the driver will not add session info (lsid, txnNumber, etc.) to the command.
+    /// Used when the command already contains session info from an external source (e.g., Java FFI).
+    skip_session_injection: bool,
 }
 
 impl<'conn> RunCommand<'conn> {
@@ -32,7 +35,27 @@ impl<'conn> RunCommand<'conn> {
             command,
             selection_criteria,
             pinned_connection,
+            skip_session_injection: false,
         }
+    }
+
+    pub(crate) fn new_with_external_session(
+        db: Database,
+        command: RawDocumentBuf,
+        selection_criteria: Option<SelectionCriteria>,
+        pinned_connection: Option<&'conn PinnedConnectionHandle>,
+    ) -> Self {
+        Self {
+            db,
+            command,
+            selection_criteria,
+            pinned_connection,
+            skip_session_injection: true,
+        }
+    }
+
+    pub(crate) fn set_skip_session_injection(&mut self, skip: bool) {
+        self.skip_session_injection = skip;
     }
 
     fn command_name(&self) -> Option<&CStr> {
@@ -90,6 +113,11 @@ impl OperationWithDefaults for RunCommand<'_> {
     }
 
     fn supports_sessions(&self) -> bool {
+        // If skip_session_injection is set, return false to prevent the driver from
+        // adding lsid/txnNumber/etc. (the command already has them from external source)
+        if self.skip_session_injection {
+            return false;
+        }
         self.command_name()
             .map(|command_name| {
                 !SESSIONS_UNSUPPORTED_COMMANDS.contains(command_name.to_lowercase().as_str())

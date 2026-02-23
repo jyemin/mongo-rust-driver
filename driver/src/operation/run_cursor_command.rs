@@ -6,7 +6,7 @@ use crate::{
     concern::WriteConcern,
     cursor::CursorSpecification,
     error::{Error, Result},
-    operation::{run_command::RunCommand, Operation, SERVER_4_4_0_WIRE_VERSION},
+    operation::{run_command::RunCommand, Operation, Retryability, SERVER_4_4_0_WIRE_VERSION},
     options::{RunCursorCommandOptions, SelectionCriteria},
     BoxFuture,
 };
@@ -17,6 +17,7 @@ use super::ExecutionContext;
 pub(crate) struct RunCursorCommand<'conn> {
     run_command: RunCommand<'conn>,
     options: Option<RunCursorCommandOptions>,
+    retryability: Retryability,
 }
 
 impl<'conn> RunCursorCommand<'conn> {
@@ -27,6 +28,33 @@ impl<'conn> RunCursorCommand<'conn> {
         Ok(Self {
             run_command,
             options,
+            retryability: Retryability::None,
+        })
+    }
+
+    pub(crate) fn new_with_retryability(
+        run_command: RunCommand<'conn>,
+        options: Option<RunCursorCommandOptions>,
+        retryability: Retryability,
+    ) -> Result<Self> {
+        Ok(Self {
+            run_command,
+            options,
+            retryability,
+        })
+    }
+
+    pub(crate) fn new_with_options(
+        mut run_command: RunCommand<'conn>,
+        options: Option<RunCursorCommandOptions>,
+        retryability: Retryability,
+        skip_session_injection: bool,
+    ) -> Result<Self> {
+        run_command.set_skip_session_injection(skip_session_injection);
+        Ok(Self {
+            run_command,
+            options,
+            retryability,
         })
     }
 }
@@ -70,7 +98,7 @@ impl Operation for RunCursorCommand<'_> {
     }
 
     fn retryability(&self) -> crate::operation::Retryability {
-        self.run_command.retryability()
+        self.retryability
     }
 
     fn update_for_retry(&mut self) {

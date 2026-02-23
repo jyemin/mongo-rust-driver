@@ -35,6 +35,7 @@ pub(crate) use common::{
     CursorReply,
     CursorSpecification,
     CursorStream,
+    ExternalSessionInfo,
     NextInBatchFuture,
     PinnedConnection,
 };

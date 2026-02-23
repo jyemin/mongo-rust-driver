@@ -5,7 +5,7 @@ use crate::{
     bson_compat::{cstr, CStr},
     checked::Checked,
     cmap::{conn::PinnedConnectionHandle, Command, RawCommandResponse, StreamDescription},
-    cursor::{CursorInformation, CursorReply},
+    cursor::{CursorInformation, CursorReply, ExternalSessionInfo},
     error::Result,
     operation::OperationWithDefaults,
     options::SelectionCriteria,
@@ -24,6 +24,9 @@ pub(crate) struct GetMore<'conn> {
     max_time: Option<Duration>,
     pinned_connection: Option<&'conn PinnedConnectionHandle>,
     comment: Option<Bson>,
+    /// External session info (from Java FFI). When set, getMore will skip Rust session
+    /// injection and inject lsid (and txnNumber/autocommit if in a transaction).
+    external_session_info: Option<ExternalSessionInfo>,
 }
 
 impl<'conn> GetMore<'conn> {
@@ -32,13 +35,14 @@ impl<'conn> GetMore<'conn> {
         pinned: Option<&'conn PinnedConnectionHandle>,
     ) -> Self {
         Self {
-            ns: info.ns,
+            ns: info.ns.clone(),
             cursor_id: info.id,
             selection_criteria: SelectionCriteria::from_address(info.address),
             batch_size: info.batch_size,
             max_time: info.max_time,
             pinned_connection: pinned,
             comment: info.comment,
+            external_session_info: info.external_session_info,
         }
     }
 }
@@ -75,7 +79,22 @@ impl OperationWithDefaults for GetMore<'_> {
             body.append(cstr!("comment"), raw_comment);
         }
 
+        // Inject external session info if present (from Java FFI)
+        if let Some(ref session_info) = self.external_session_info {
+            body.append(cstr!("lsid"), session_info.lsid.clone());
+            // Only inject txnNumber and autocommit if in a transaction
+            if let Some(txn_number) = session_info.txn_number {
+                body.append(cstr!("txnNumber"), txn_number);
+                body.append(cstr!("autocommit"), false);
+            }
+        }
+
         Ok(Command::from_operation(self, body))
+    }
+
+    fn supports_sessions(&self) -> bool {
+        // Skip Rust session injection when we have external session info (from Java FFI)
+        self.external_session_info.is_none()
     }
 
     fn handle_response_cow<'a>(

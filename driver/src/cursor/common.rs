@@ -449,6 +449,7 @@ impl CursorSpecification {
                 batch_size: batch_size.into(),
                 max_time: max_time.into(),
                 comment: comment.into(),
+                external_session_info: None,
             },
             initial_reply: response.into_raw_document_buf(),
             is_empty,
@@ -458,6 +459,12 @@ impl CursorSpecification {
 
     pub(crate) fn id(&self) -> i64 {
         self.info.id
+    }
+
+    /// Set the external session info for getMore operations (from Java FFI).
+    /// If txn_number is Some, getMore will include txnNumber and autocommit (for transactions).
+    pub(crate) fn set_external_session_info(&mut self, lsid: RawDocumentBuf, txn_number: Option<i64>) {
+        self.info.external_session_info = Some(ExternalSessionInfo { lsid, txn_number });
     }
 }
 
@@ -497,6 +504,18 @@ pub(crate) struct CursorInformation {
     pub(crate) batch_size: Option<u32>,
     pub(crate) max_time: Option<Duration>,
     pub(crate) comment: Option<Bson>,
+    /// External session/transaction info (from Java FFI) for getMore operations.
+    /// When set, getMore will skip Rust session injection and inject these values instead.
+    pub(crate) external_session_info: Option<ExternalSessionInfo>,
+}
+
+/// External session/transaction information for getMore operations (from Java FFI).
+/// When txn_number is Some, this is a transaction and getMore will include txnNumber and autocommit.
+/// When txn_number is None, only lsid is injected.
+#[derive(Clone, Debug)]
+pub(crate) struct ExternalSessionInfo {
+    pub(crate) lsid: RawDocumentBuf,
+    pub(crate) txn_number: Option<i64>,
 }
 
 #[derive(Debug)]

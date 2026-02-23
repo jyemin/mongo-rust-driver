@@ -168,8 +168,17 @@ impl RawBatchCursor {
         }
     }
 
-    pub(crate) fn is_exhausted(&self) -> bool {
+    pub fn is_exhausted(&self) -> bool {
         self.state.exhausted
+    }
+
+    /// Set the external transaction info for getMore operations.
+    ///
+    /// When set, getMore will skip Rust session injection and inject lsid (and txnNumber/autocommit
+    /// if in a transaction). This is used by the Java FFI layer to ensure getMore uses the same
+    /// session/transaction as the initial cursor command.
+    pub fn set_external_session_info(&mut self, lsid: RawDocumentBuf, txn_number: Option<i64>) {
+        self.info.external_session_info = Some(super::common::ExternalSessionInfo { lsid, txn_number });
     }
 
     fn mark_exhausted(&mut self) {
