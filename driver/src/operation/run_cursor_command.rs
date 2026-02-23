@@ -32,18 +32,6 @@ impl<'conn> RunCursorCommand<'conn> {
         })
     }
 
-    pub(crate) fn new_with_retryability(
-        run_command: RunCommand<'conn>,
-        options: Option<RunCursorCommandOptions>,
-        retryability: Retryability,
-    ) -> Result<Self> {
-        Ok(Self {
-            run_command,
-            options,
-            retryability,
-        })
-    }
-
     pub(crate) fn new_with_options(
         mut run_command: RunCommand<'conn>,
         options: Option<RunCursorCommandOptions>,

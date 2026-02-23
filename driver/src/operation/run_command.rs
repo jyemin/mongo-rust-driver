@@ -39,21 +39,6 @@ impl<'conn> RunCommand<'conn> {
         }
     }
 
-    pub(crate) fn new_with_external_session(
-        db: Database,
-        command: RawDocumentBuf,
-        selection_criteria: Option<SelectionCriteria>,
-        pinned_connection: Option<&'conn PinnedConnectionHandle>,
-    ) -> Self {
-        Self {
-            db,
-            command,
-            selection_criteria,
-            pinned_connection,
-            skip_session_injection: true,
-        }
-    }
-
     pub(crate) fn set_skip_session_injection(&mut self, skip: bool) {
         self.skip_session_injection = skip;
     }
@@ -159,22 +144,6 @@ pub(crate) struct RunCommandRaw<'conn> {
 }
 
 impl<'conn> RunCommandRaw<'conn> {
-    pub(crate) fn new(
-        db: Database,
-        command: RawDocumentBuf,
-        selection_criteria: Option<SelectionCriteria>,
-        pinned_connection: Option<&'conn PinnedConnectionHandle>,
-    ) -> Self {
-        Self {
-            db,
-            command,
-            selection_criteria,
-            pinned_connection,
-            retryability: Retryability::None,
-            skip_session_injection: false,
-        }
-    }
-
     /// Create a new RunCommandRaw with specified retryability
     pub(crate) fn new_with_retryability(
         db: Database,

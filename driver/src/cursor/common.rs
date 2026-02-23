@@ -460,12 +460,6 @@ impl CursorSpecification {
     pub(crate) fn id(&self) -> i64 {
         self.info.id
     }
-
-    /// Set the external session info for getMore operations (from Java FFI).
-    /// If txn_number is Some, getMore will include txnNumber and autocommit (for transactions).
-    pub(crate) fn set_external_session_info(&mut self, lsid: RawDocumentBuf, txn_number: Option<i64>) {
-        self.info.external_session_info = Some(ExternalSessionInfo { lsid, txn_number });
-    }
 }
 
 /// Fields in an server cursor reply value, minus the actual documents.
