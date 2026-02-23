@@ -65,7 +65,7 @@ in-use-encryption-unstable = ["in-use-encryption"]
 # Enables support for emitting tracing events.
 # The tracing API is unstable and may have backwards-incompatible changes in minor version updates.
 # TODO: pending https://github.com/tokio-rs/tracing/issues/2036 stop depending directly on log.
-tracing-unstable = ["dep:tracing", "dep:log", "bson3?/serde_json-1"]
+tracing-unstable = ["dep:tracing", "dep:tracing-subscriber", "dep:log", "bson3?/serde_json-1"]
 
 # Enables support for text indexes in explicit encryption. This feature is in preview and should be
 # used for experimental workloads only. This feature is unstable and its security is not guaranteed
@@ -120,6 +120,7 @@ take_mut = "0.2.2"
 thiserror = "2"
 tokio-openssl = { version = "0.6.3", optional = true }
 tracing = { version = "0.1.36", optional = true }
+tracing-subscriber = { version = "0.3", optional = true, features = ["env-filter"] }
 typed-builder = "0.22.0"
 webpki-roots = { version = "1", optional = true }
 zstd = { version = "0.11.2", optional = true }

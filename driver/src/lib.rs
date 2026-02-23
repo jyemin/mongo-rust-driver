@@ -60,6 +60,7 @@ pub mod sync;
 mod test;
 #[cfg(feature = "tracing-unstable")]
 mod trace;
+pub mod ffi;
 pub(crate) mod tracking_arc;
 
 #[cfg(not(any(feature = "bson-2", feature = "bson-3")))]
