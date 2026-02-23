@@ -93,6 +93,13 @@ pub fn serialize_mongodb_error(error: &crate::error::Error) -> Vec<u8> {
             String::new(),
             message.clone(),
         ),
+        // I/O errors are connection errors (socket errors, network errors, etc.)
+        crate::error::ErrorKind::Io(_) => (
+            ERROR_CATEGORY_CONNECTION,
+            -1,
+            String::new(),
+            error.to_string(),
+        ),
         _ => (
             ERROR_CATEGORY_INTERNAL,
             -1,
