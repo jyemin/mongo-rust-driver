@@ -42,15 +42,27 @@ pub struct FfiLogEvent {
 
 /// Callback type for log events (C FFI / JNA)
 /// Java implements this and passes to Rust via init_logging()
-pub type LogCallback = extern "C" fn(event: *const FfiLogEvent);
+/// The userdata parameter is passed through from init_logging for closure context
+pub type LogCallback = extern "C" fn(userdata: *mut std::ffi::c_void, event: *const FfiLogEvent);
 
 /// Callback type for log events (JNI)
 /// Function pointer that takes Rust strings and invokes Java via JNI
 pub type JniLogCallback =
     fn(level: i32, target: &str, message: &str, field_names: &[&str], field_values: &[&str]);
 
+/// Wrapper to make *mut c_void Send+Sync for use across threads
+/// Safety: The caller must ensure the userdata pointer remains valid
+/// for the lifetime of the logging system.
+#[derive(Clone, Copy)]
+struct SendSyncUserdata(*mut std::ffi::c_void);
+unsafe impl Send for SendSyncUserdata {}
+unsafe impl Sync for SendSyncUserdata {}
+
 /// Global C FFI log callback (set once via init_logging)
 static GLOBAL_LOG_CALLBACK: RwLock<Option<LogCallback>> = RwLock::new(None);
+
+/// Global C FFI log callback userdata (set once via init_logging)
+static GLOBAL_LOG_USERDATA: RwLock<Option<SendSyncUserdata>> = RwLock::new(None);
 
 /// Global JNI log callback (set once via init_logging_with_jni_callback)
 static GLOBAL_JNI_LOG_CALLBACK: RwLock<Option<JniLogCallback>> = RwLock::new(None);
@@ -60,11 +72,14 @@ static GLOBAL_JNI_LOG_CALLBACK: RwLock<Option<JniLogCallback>> = RwLock::new(Non
 static HAS_ANY_CALLBACK: AtomicBool = AtomicBool::new(false);
 
 /// Set the global C FFI log callback (called from init_logging FFI)
-pub fn set_global_log_callback(callback: LogCallback) {
+pub fn set_global_log_callback(userdata: *mut std::ffi::c_void, callback: LogCallback) {
     if let Ok(mut cb) = GLOBAL_LOG_CALLBACK.write() {
         *cb = Some(callback);
-        HAS_ANY_CALLBACK.store(true, Ordering::Release);
     }
+    if let Ok(mut ud) = GLOBAL_LOG_USERDATA.write() {
+        *ud = Some(SendSyncUserdata(userdata));
+    }
+    HAS_ANY_CALLBACK.store(true, Ordering::Release);
 }
 
 /// Set the global JNI log callback
@@ -80,13 +95,20 @@ fn has_callback() -> bool {
     HAS_ANY_CALLBACK.load(Ordering::Acquire)
 }
 
-/// Get the global C FFI callback for invoking
-fn get_callback() -> Option<LogCallback> {
-    if let Ok(cb) = GLOBAL_LOG_CALLBACK.read() {
+/// Get the global C FFI callback and userdata for invoking
+fn get_callback_with_userdata() -> Option<(*mut std::ffi::c_void, LogCallback)> {
+    let callback = if let Ok(cb) = GLOBAL_LOG_CALLBACK.read() {
         *cb
     } else {
         None
+    }?;
+    let userdata = if let Ok(ud) = GLOBAL_LOG_USERDATA.read() {
+        ud.map(|w| w.0)
+    } else {
+        None
     }
+    .unwrap_or(std::ptr::null_mut());
+    Some((userdata, callback))
 }
 
 /// Get the global JNI callback for invoking
@@ -109,7 +131,7 @@ fn send_log_event(level: i32, target: &str, message: &str, fields: &[(&str, &str
     }
 
     // Fall back to C FFI callback
-    let callback = match get_callback() {
+    let (userdata, callback) = match get_callback_with_userdata() {
         Some(cb) => cb,
         None => return,
     };
@@ -146,8 +168,8 @@ fn send_log_event(level: i32, target: &str, message: &str, fields: &[(&str, &str
         fields: ffi_fields.as_ptr(),
     };
 
-    // Invoke the global callback
-    callback(&event);
+    // Invoke the global callback with userdata
+    callback(userdata, &event);
 }
 
 // ============================================================================
@@ -320,15 +342,18 @@ fn store_log_levels(
 /// Note: We use EnvFilter set to DEBUG for all crate::* targets, then do
 /// runtime filtering in FfiTracingLayer based on CURRENT_LOG_LEVELS.
 /// This allows levels to be updated at runtime via update_log_levels().
+///
+/// The userdata parameter is passed through to the callback for closure context.
 pub fn init_logging(
+    userdata: *mut std::ffi::c_void,
     callback: LogCallback,
     command_level: i32,
     connection_level: i32,
     server_selection_level: i32,
     topology_level: i32,
 ) {
-    // Set the global callback
-    set_global_log_callback(callback);
+    // Set the global callback with userdata
+    set_global_log_callback(userdata, callback);
 
     // Store the initial log levels for runtime filtering
     store_log_levels(

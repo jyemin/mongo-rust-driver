@@ -9,6 +9,21 @@ use crate::options::{ClientOptions, Credential, ServerAddress};
 use std::ffi::CStr;
 use std::os::raw::c_char;
 
+/// Wrapper to make *mut c_void Send+Sync for use across async boundaries
+/// Safety: The caller must ensure the userdata pointer remains valid
+/// for the lifetime of the async operation.
+#[derive(Clone, Copy)]
+struct SendSyncUserdata(*mut std::ffi::c_void);
+unsafe impl Send for SendSyncUserdata {}
+unsafe impl Sync for SendSyncUserdata {}
+
+impl SendSyncUserdata {
+    /// Get the raw pointer - use this to avoid capturing the raw pointer in async blocks
+    fn ptr(&self) -> *mut std::ffi::c_void {
+        self.0
+    }
+}
+
 // ============================================================================
 // Session Management Functions (for FFM)
 // ============================================================================
@@ -118,6 +133,7 @@ pub extern "C" fn mongo_free_bytes(data: *mut u8, len: usize) {
 ///
 /// Log levels: 0 = DEBUG, 1 = INFO, 2 = WARN (effectively disabled)
 ///
+/// NOTE: userdata is passed through to the callback for closure context
 /// NOTE: callback MUST be the last parameter for JNA compatibility
 #[cfg(feature = "tracing-unstable")]
 #[no_mangle]
@@ -126,9 +142,11 @@ pub extern "C" fn mongo_init_logging(
     connection_level: i32,
     server_selection_level: i32,
     topology_level: i32,
+    userdata: *mut std::ffi::c_void,
     callback: LogCallback,
 ) {
     init_logging(
+        userdata,
         callback,
         command_level,
         connection_level,
@@ -166,12 +184,14 @@ pub extern "C" fn mongo_update_log_levels(
 /// NOTE: Logging is now initialized globally via mongo_init_logging()
 /// NOTE: max_document_length controls log truncation per-client
 /// NOTE: command_event_callback can be NULL if no event monitoring is needed
+/// NOTE: command_event_userdata is passed through to command_event_callback (for closure context)
 #[no_mangle]
 pub extern "C" fn mongo_client_new(
     connection_settings: *const ConnectionSettings,
     auth_settings: *const AuthSettings,
     tls_settings: *const TlsSettings,
     max_document_length: i32,
+    command_event_userdata: *mut std::ffi::c_void,
     command_event_callback: CommandEventCallback,
 ) -> *mut MongoClient {
     if connection_settings.is_null() {
@@ -191,6 +211,7 @@ pub extern "C" fn mongo_client_new(
             auth_settings,
             tls_settings,
             max_document_length,
+            command_event_userdata,
             command_event_callback,
         ) {
             Ok(opts) => opts,
@@ -217,11 +238,13 @@ pub extern "C" fn mongo_client_new(
 
 /// Build ClientOptions from settings structs
 /// Note: command_event_callback is CommandEventCallback (which is Option<fn>) - None means no callback
+/// Note: command_event_userdata is passed through to the callback for closure context
 unsafe fn build_client_options(
     connection_settings: *const ConnectionSettings,
     auth_settings: *const AuthSettings,
     tls_settings: *const TlsSettings,
     max_document_length: i32,
+    command_event_userdata: *mut std::ffi::c_void,
     command_event_callback: CommandEventCallback,
 ) -> Result<ClientOptions, Box<dyn std::error::Error>> {
     let conn_settings = &*connection_settings;
@@ -231,7 +254,8 @@ unsafe fn build_client_options(
 
     // Wire up command event handler if callback was provided (CommandEventCallback is Option<fn>)
     if let Some(callback) = command_event_callback {
-        options.command_event_handler = Some(create_command_event_handler(callback));
+        options.command_event_handler =
+            Some(create_command_event_handler(command_event_userdata, callback));
     }
 
     // Apply connection settings
@@ -370,6 +394,7 @@ use super::ops;
 /// - database: Database name (null-terminated C string)
 /// - command: BSON command bytes
 /// - context: Operation context with session, transaction, and retryability info
+/// - userdata: Opaque pointer passed through to callback (for closure context)
 /// - callback: Callback to invoke with result
 #[no_mangle]
 pub extern "C" fn mongo_execute_command(
@@ -377,6 +402,7 @@ pub extern "C" fn mongo_execute_command(
     database: *const c_char,
     command: *const BsonBytes,
     context: *const OperationContext,
+    userdata: *mut std::ffi::c_void,
     callback: SingleResultCallback,
 ) {
     if client.is_null() || database.is_null() || command.is_null() {
@@ -385,7 +411,7 @@ pub extern "C" fn mongo_execute_command(
             data: error_msg.as_ptr(),
             len: error_msg.len(),
         };
-        callback(false, &error_bytes);
+        callback(userdata, false, &error_bytes);
         return;
     }
 
@@ -403,7 +429,7 @@ pub extern "C" fn mongo_execute_command(
                 data: error_msg.as_ptr(),
                 len: error_msg.len(),
             };
-            callback(false, &error_bytes);
+            callback(userdata, false, &error_bytes);
             return;
         }
         std::slice::from_raw_parts(bson_bytes.data, bson_bytes.len).to_vec()
@@ -425,13 +451,16 @@ pub extern "C" fn mongo_execute_command(
                 data: error_bytes.as_ptr(),
                 len: error_bytes.len(),
             };
-            callback(false, &bson_bytes);
+            callback(userdata, false, &bson_bytes);
             return;
         }
     };
 
     let retry = core::to_retryability(params.retryability);
     let client_clone = mongo_client.client.clone();
+
+    // Wrap userdata for Send+Sync across async boundary
+    let ud = SendSyncUserdata(userdata);
 
     // Spawn async task using shared ops function
     mongo_client.runtime.spawn(async move {
@@ -443,14 +472,14 @@ pub extern "C" fn mongo_execute_command(
                     data: bytes.as_ptr(),
                     len: bytes.len(),
                 };
-                callback(true, &bson_bytes);
+                callback(ud.ptr(), true, &bson_bytes);
             }
             Err(error_bytes) => {
                 let bson_bytes = BsonBytes {
                     data: error_bytes.as_ptr(),
                     len: error_bytes.len(),
                 };
-                callback(false, &bson_bytes);
+                callback(ud.ptr(), false, &bson_bytes);
             }
         }
     });
@@ -498,6 +527,7 @@ fn context_to_params(context: *const OperationContext) -> OperationParams {
 /// - command: BSON command bytes
 /// - batch_size: Batch size for getMore operations (0 = use server default)
 /// - context: Operation context with session, transaction, and retryability info
+/// - userdata: Opaque pointer passed through to callback (for closure context)
 /// - callback: Callback to invoke with result
 #[no_mangle]
 pub extern "C" fn mongo_execute_cursor_command(
@@ -506,6 +536,7 @@ pub extern "C" fn mongo_execute_cursor_command(
     command: *const BsonBytes,
     batch_size: i32,
     context: *const OperationContext,
+    userdata: *mut std::ffi::c_void,
     callback: CursorResultCallback,
 ) {
     if client.is_null() || database.is_null() || command.is_null() {
@@ -514,7 +545,7 @@ pub extern "C" fn mongo_execute_cursor_command(
             data: error_msg.as_ptr(),
             len: error_msg.len(),
         };
-        callback(false, 0, false, &error_bytes);
+        callback(userdata, false, 0, false, &error_bytes);
         return;
     }
 
@@ -532,7 +563,7 @@ pub extern "C" fn mongo_execute_cursor_command(
                 data: error_msg.as_ptr(),
                 len: error_msg.len(),
             };
-            callback(false, 0, false, &error_bytes);
+            callback(userdata, false, 0, false, &error_bytes);
             return;
         }
         std::slice::from_raw_parts(bson_bytes.data, bson_bytes.len).to_vec()
@@ -558,7 +589,7 @@ pub extern "C" fn mongo_execute_cursor_command(
                     data: error_bytes.as_ptr(),
                     len: error_bytes.len(),
                 };
-                callback(false, 0, false, &bson_bytes);
+                callback(userdata, false, 0, false, &bson_bytes);
                 return;
             }
         };
@@ -571,6 +602,9 @@ pub extern "C" fn mongo_execute_cursor_command(
     };
     let client_clone = mongo_client.client.clone();
     let cursor_manager = mongo_client.cursor_manager.clone();
+
+    // Wrap userdata for Send+Sync across async boundary
+    let ud = SendSyncUserdata(userdata);
 
     // Spawn async task using shared ops function
     mongo_client.runtime.spawn(async move {
@@ -593,14 +627,14 @@ pub extern "C" fn mongo_execute_cursor_command(
                     data: r.first_batch_bytes.as_ptr(),
                     len: r.first_batch_bytes.len(),
                 };
-                callback(true, r.cursor_handle, r.exhausted, &bson_bytes);
+                callback(ud.ptr(), true, r.cursor_handle, r.exhausted, &bson_bytes);
             }
             Err(error_bytes) => {
                 let bson_bytes = BsonBytes {
                     data: error_bytes.as_ptr(),
                     len: error_bytes.len(),
                 };
-                callback(false, 0, false, &bson_bytes);
+                callback(ud.ptr(), false, 0, false, &bson_bytes);
             }
         }
     });
@@ -612,11 +646,13 @@ pub extern "C" fn mongo_execute_cursor_command(
 /// Parameters:
 /// - client: The MongoClient pointer
 /// - cursor_handle: Handle to the cursor
+/// - userdata: Opaque pointer passed through to callback (for closure context)
 /// - callback: Callback to invoke with result
 #[no_mangle]
 pub extern "C" fn mongo_cursor_get_more(
     client: *mut MongoClient,
     cursor_handle: u64,
+    userdata: *mut std::ffi::c_void,
     callback: GetMoreResultCallback,
 ) {
     if client.is_null() {
@@ -625,12 +661,15 @@ pub extern "C" fn mongo_cursor_get_more(
             data: error_msg.as_ptr(),
             len: error_msg.len(),
         };
-        callback(false, false, &error_bytes);
+        callback(userdata, false, false, &error_bytes);
         return;
     }
 
     let mongo_client = unsafe { &*client };
     let cursor_manager = mongo_client.cursor_manager.clone();
+
+    // Wrap userdata for Send+Sync across async boundary
+    let ud = SendSyncUserdata(userdata);
 
     // Spawn async task using shared ops function
     mongo_client.runtime.spawn(async move {
@@ -642,14 +681,14 @@ pub extern "C" fn mongo_cursor_get_more(
                     data: r.batch_bytes.as_ptr(),
                     len: r.batch_bytes.len(),
                 };
-                callback(true, r.exhausted, &bson_bytes);
+                callback(ud.ptr(), true, r.exhausted, &bson_bytes);
             }
             Err((error_bytes, _cursor_valid)) => {
                 let bson_bytes = BsonBytes {
                     data: error_bytes.as_ptr(),
                     len: error_bytes.len(),
                 };
-                callback(false, false, &bson_bytes);
+                callback(ud.ptr(), false, false, &bson_bytes);
             }
         }
     });
@@ -661,11 +700,13 @@ pub extern "C" fn mongo_cursor_get_more(
 /// Parameters:
 /// - client: The MongoClient pointer
 /// - cursor_handle: Handle to the cursor
+/// - userdata: Opaque pointer passed through to callback (for closure context)
 /// - callback: Callback to invoke on completion
 #[no_mangle]
 pub extern "C" fn mongo_cursor_close(
     client: *mut MongoClient,
     cursor_handle: u64,
+    userdata: *mut std::ffi::c_void,
     callback: SingleResultCallback,
 ) {
     if client.is_null() {
@@ -674,7 +715,7 @@ pub extern "C" fn mongo_cursor_close(
             data: error_msg.as_ptr(),
             len: error_msg.len(),
         };
-        callback(false, &error_bytes);
+        callback(userdata, false, &error_bytes);
         return;
     }
 
@@ -691,5 +732,5 @@ pub extern "C" fn mongo_cursor_close(
         data: std::ptr::null(),
         len: 0,
     };
-    callback(true, &empty);
+    callback(userdata, true, &empty);
 }

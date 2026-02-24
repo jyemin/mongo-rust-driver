@@ -103,17 +103,28 @@ impl Default for FfiCommandEvent {
 
 /// Callback function type for command events (non-nullable)
 /// This is the actual function signature that Java implements
-pub type CommandEventCallbackFn = extern "C" fn(event: *const FfiCommandEvent);
+/// The userdata parameter is passed through from client creation for closure context
+pub type CommandEventCallbackFn =
+    extern "C" fn(userdata: *mut std::ffi::c_void, event: *const FfiCommandEvent);
 
 /// Nullable callback type for command events
 /// Java implements this and passes to Rust during client creation
 /// cbindgen should translate Option<extern "C" fn(...)> to a nullable C function pointer
-pub type CommandEventCallback = Option<extern "C" fn(event: *const FfiCommandEvent)>;
+pub type CommandEventCallback =
+    Option<extern "C" fn(userdata: *mut std::ffi::c_void, event: *const FfiCommandEvent)>;
 
 /// Generate a new unique operation ID
 pub fn generate_operation_id() -> i64 {
     OPERATION_ID_COUNTER.fetch_add(1, Ordering::SeqCst)
 }
+
+/// Wrapper to make *mut c_void Send+Sync for use across async boundaries
+/// Safety: The caller must ensure the userdata pointer remains valid for the lifetime
+/// of the EventHandler and is safe to access from multiple threads.
+#[derive(Clone, Copy)]
+struct SendSyncUserdata(*mut std::ffi::c_void);
+unsafe impl Send for SendSyncUserdata {}
+unsafe impl Sync for SendSyncUserdata {}
 
 /// Create an EventHandler that forwards command events to the Java callback
 ///
@@ -123,15 +134,19 @@ pub fn generate_operation_id() -> i64 {
 /// 3. Calls the Java callback with a pointer to the FFI event
 ///
 /// # Safety
-/// The callback must remain valid for the lifetime of the EventHandler.
+/// The callback and userdata must remain valid for the lifetime of the EventHandler.
 /// The callback is called synchronously, so any data pointed to by FfiCommandEvent
 /// is only valid during the callback invocation.
 /// Note: This function takes the unwrapped function type (not Option), as the caller
 /// has already verified the callback is Some.
 pub fn create_command_event_handler(
+    userdata: *mut std::ffi::c_void,
     callback: CommandEventCallbackFn,
 ) -> crate::event::EventHandler<crate::event::command::CommandEvent> {
     use crate::event::{command::CommandEvent, EventHandler};
+
+    // Wrap userdata for Send+Sync
+    let userdata_wrapper = SendSyncUserdata(userdata);
 
     // Generate a shared operation ID for this handler
     // NOTE: In a real implementation, we'd want to track request_id -> operation_id mapping
@@ -140,10 +155,12 @@ pub fn create_command_event_handler(
 
     EventHandler::callback(move |event: CommandEvent| {
         // Convert the Rust event to our FFI structure and invoke callback
+        // Note: We use userdata_wrapper (SendSyncUserdata) to satisfy Send+Sync bounds,
+        // then extract the raw pointer at callback invocation time
         match &event {
-            CommandEvent::Started(e) => convert_started_event(e, callback),
-            CommandEvent::Succeeded(e) => convert_succeeded_event(e, callback),
-            CommandEvent::Failed(e) => convert_failed_event(e, callback),
+            CommandEvent::Started(e) => convert_started_event(e, userdata_wrapper, callback),
+            CommandEvent::Succeeded(e) => convert_succeeded_event(e, userdata_wrapper, callback),
+            CommandEvent::Failed(e) => convert_failed_event(e, userdata_wrapper, callback),
             _ => {} // Handle any future variants gracefully
         }
     })
@@ -152,6 +169,7 @@ pub fn create_command_event_handler(
 /// Convert CommandStartedEvent to FfiCommandEvent and invoke callback
 fn convert_started_event(
     event: &crate::event::command::CommandStartedEvent,
+    userdata: SendSyncUserdata,
     callback: CommandEventCallbackFn,
 ) {
     // Prepare strings - these must live until after the callback returns
@@ -186,8 +204,8 @@ fn convert_started_event(
         error_message: std::ptr::null(),
     };
 
-    // Invoke the Java callback
-    callback(&ffi_event);
+    // Invoke the callback with userdata (extract raw pointer from wrapper)
+    callback(userdata.0, &ffi_event);
 
     // All CStrings and Vec are dropped here after callback returns
 }
@@ -196,6 +214,7 @@ fn convert_started_event(
 /// NOTE: CommandSucceededEvent doesn't have a `db` field - we pass empty string
 fn convert_succeeded_event(
     event: &crate::event::command::CommandSucceededEvent,
+    userdata: SendSyncUserdata,
     callback: CommandEventCallbackFn,
 ) {
     // Prepare strings - NOTE: db is not available in CommandSucceededEvent
@@ -230,14 +249,15 @@ fn convert_succeeded_event(
         error_message: std::ptr::null(),
     };
 
-    // Invoke the Java callback
-    callback(&ffi_event);
+    // Invoke the callback with userdata (extract raw pointer from wrapper)
+    callback(userdata.0, &ffi_event);
 }
 
 /// Convert CommandFailedEvent to FfiCommandEvent and invoke callback
 /// NOTE: CommandFailedEvent doesn't have a `db` field - we pass empty string
 fn convert_failed_event(
     event: &crate::event::command::CommandFailedEvent,
+    userdata: SendSyncUserdata,
     callback: CommandEventCallbackFn,
 ) {
     // Prepare strings - NOTE: db is not available in CommandFailedEvent
@@ -270,8 +290,8 @@ fn convert_failed_event(
         error_message: error_cstring.as_ptr(),
     };
 
-    // Invoke the Java callback
-    callback(&ffi_event);
+    // Invoke the callback with userdata (extract raw pointer from wrapper)
+    callback(userdata.0, &ffi_event);
 }
 
 /// Build FfiConnectionInfo from Rust driver's ConnectionInfo
@@ -337,7 +357,8 @@ mod tests {
         static EVENT_COUNT: AtomicUsize = AtomicUsize::new(0);
 
         // Callback that increments the counter
-        extern "C" fn test_callback(event: *const FfiCommandEvent) {
+        // Takes userdata as first param (ignored) per C FFI pattern
+        extern "C" fn test_callback(_userdata: *mut std::ffi::c_void, event: *const FfiCommandEvent) {
             if !event.is_null() {
                 let e = unsafe { &*event };
                 println!("Received event type: {:?}", e.event_type);
@@ -351,7 +372,8 @@ mod tests {
         // Build client options with event handler
         let mut options = crate::options::ClientOptions::default();
         options.hosts = vec!["localhost:27017".parse().unwrap()];
-        options.command_event_handler = Some(create_command_event_handler(test_callback));
+        // Pass null for userdata since this is just a test
+        options.command_event_handler = Some(create_command_event_handler(std::ptr::null_mut(), test_callback));
 
         // Create client and execute a command
         runtime.block_on(async {

@@ -72,7 +72,8 @@ typedef struct FfiLogEvent {
 
 // Callback type for log events (C FFI / JNA)
 // Java implements this and passes to Rust via init_logging()
-typedef void (*LogCallback)(const struct FfiLogEvent *event);
+// The userdata parameter is passed through from init_logging for closure context
+typedef void (*LogCallback)(void *userdata, const struct FfiLogEvent *event);
 
 // Connection/topology settings passed from Java.
 // Must match the layout of ConnectionSettings.java.
@@ -180,7 +181,7 @@ typedef struct FfiCommandEvent {
 // Nullable callback type for command events
 // Java implements this and passes to Rust during client creation
 // cbindgen should translate Option<extern "C" fn(...)> to a nullable C function pointer
-typedef void (*CommandEventCallback)(const struct FfiCommandEvent *event);
+typedef void (*CommandEventCallback)(void *userdata, const struct FfiCommandEvent *event);
 
 // Operation context passed across FFI boundary
 // Contains session, transaction, and retryability information
@@ -206,18 +207,21 @@ typedef struct OperationContext {
 // Callback for single result operations
 //
 // # Parameters
+// * `userdata` - Opaque pointer passed through from the caller (for closure context)
 // * `success` - Whether the operation succeeded
 // * `data` - BSON bytes for the result (if success=true) or error (if success=false)
-typedef void (*SingleResultCallback)(bool success, const struct BsonBytes *data);
+typedef void (*SingleResultCallback)(void *userdata, bool success, const struct BsonBytes *data);
 
 // Callback for cursor operations
 //
 // # Parameters
+// * `userdata` - Opaque pointer passed through from the caller (for closure context)
 // * `success` - Whether the operation succeeded
 // * `cursor_handle` - Handle to the cursor (0 on error)
 // * `exhausted` - Whether the cursor is exhausted (no more batches)
 // * `data` - BSON bytes for the batch (firstBatch or nextBatch)
-typedef void (*CursorResultCallback)(bool success,
+typedef void (*CursorResultCallback)(void *userdata,
+                                     bool success,
                                      uint64_t cursor_handle,
                                      bool exhausted,
                                      const struct BsonBytes *data);
@@ -225,10 +229,14 @@ typedef void (*CursorResultCallback)(bool success,
 // Callback for getMore operations
 //
 // # Parameters
+// * `userdata` - Opaque pointer passed through from the caller (for closure context)
 // * `success` - Whether the operation succeeded
 // * `exhausted` - Whether the cursor is exhausted (no more batches)
 // * `data` - BSON bytes for the nextBatch
-typedef void (*GetMoreResultCallback)(bool success, bool exhausted, const struct BsonBytes *data);
+typedef void (*GetMoreResultCallback)(void *userdata,
+                                      bool success,
+                                      bool exhausted,
+                                      const struct BsonBytes *data);
 
 // Acquire a session from the client's session pool.
 // Returns a session handle (non-zero), or 0 on error.
@@ -259,11 +267,13 @@ void mongo_free_bytes(uint8_t *data, uintptr_t len);
 //
 // Log levels: 0 = DEBUG, 1 = INFO, 2 = WARN (effectively disabled)
 //
+// NOTE: userdata is passed through to the callback for closure context
 // NOTE: callback MUST be the last parameter for JNA compatibility
 void mongo_init_logging(int32_t command_level,
                         int32_t connection_level,
                         int32_t server_selection_level,
                         int32_t topology_level,
+                        void *userdata,
                         LogCallback callback);
 
 // Update log levels at runtime.
@@ -284,10 +294,12 @@ void mongo_update_log_levels(int32_t command_level,
 // NOTE: Logging is now initialized globally via mongo_init_logging()
 // NOTE: max_document_length controls log truncation per-client
 // NOTE: command_event_callback can be NULL if no event monitoring is needed
+// NOTE: command_event_userdata is passed through to command_event_callback (for closure context)
 struct MongoClient *mongo_client_new(const struct ConnectionSettings *connection_settings,
                                      const struct AuthSettings *auth_settings,
                                      const struct TlsSettings *tls_settings,
                                      int32_t max_document_length,
+                                     void *command_event_userdata,
                                      CommandEventCallback command_event_callback);
 
 // Destroy a MongoDB client
@@ -301,11 +313,13 @@ void mongo_client_destroy(struct MongoClient *client);
 // - database: Database name (null-terminated C string)
 // - command: BSON command bytes
 // - context: Operation context with session, transaction, and retryability info
+// - userdata: Opaque pointer passed through to callback (for closure context)
 // - callback: Callback to invoke with result
 void mongo_execute_command(struct MongoClient *client,
                            const char *database,
                            const struct BsonBytes *command,
                            const struct OperationContext *context,
+                           void *userdata,
                            SingleResultCallback callback);
 
 // Execute a cursor-returning command (find, aggregate, listCollections, etc.)
@@ -317,12 +331,14 @@ void mongo_execute_command(struct MongoClient *client,
 // - command: BSON command bytes
 // - batch_size: Batch size for getMore operations (0 = use server default)
 // - context: Operation context with session, transaction, and retryability info
+// - userdata: Opaque pointer passed through to callback (for closure context)
 // - callback: Callback to invoke with result
 void mongo_execute_cursor_command(struct MongoClient *client,
                                   const char *database,
                                   const struct BsonBytes *command,
                                   int32_t batch_size,
                                   const struct OperationContext *context,
+                                  void *userdata,
                                   CursorResultCallback callback);
 
 // Execute getMore on a cursor (get next batch).
@@ -331,9 +347,11 @@ void mongo_execute_cursor_command(struct MongoClient *client,
 // Parameters:
 // - client: The MongoClient pointer
 // - cursor_handle: Handle to the cursor
+// - userdata: Opaque pointer passed through to callback (for closure context)
 // - callback: Callback to invoke with result
 void mongo_cursor_get_more(struct MongoClient *client,
                            uint64_t cursor_handle,
+                           void *userdata,
                            GetMoreResultCallback callback);
 
 // Close a cursor and clean up resources.
@@ -342,9 +360,11 @@ void mongo_cursor_get_more(struct MongoClient *client,
 // Parameters:
 // - client: The MongoClient pointer
 // - cursor_handle: Handle to the cursor
+// - userdata: Opaque pointer passed through to callback (for closure context)
 // - callback: Callback to invoke on completion
 void mongo_cursor_close(struct MongoClient *client,
                         uint64_t cursor_handle,
+                        void *userdata,
                         SingleResultCallback callback);
 
 /* End of auto-generated header */

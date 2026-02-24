@@ -36,28 +36,41 @@ pub struct OperationContext {
 /// Callback for single result operations
 ///
 /// # Parameters
+/// * `userdata` - Opaque pointer passed through from the caller (for closure context)
 /// * `success` - Whether the operation succeeded
 /// * `data` - BSON bytes for the result (if success=true) or error (if success=false)
-pub type SingleResultCallback = extern "C" fn(success: bool, data: *const BsonBytes);
+pub type SingleResultCallback =
+    extern "C" fn(userdata: *mut std::ffi::c_void, success: bool, data: *const BsonBytes);
 
 /// Callback for cursor operations
 ///
 /// # Parameters
+/// * `userdata` - Opaque pointer passed through from the caller (for closure context)
 /// * `success` - Whether the operation succeeded
 /// * `cursor_handle` - Handle to the cursor (0 on error)
 /// * `exhausted` - Whether the cursor is exhausted (no more batches)
 /// * `data` - BSON bytes for the batch (firstBatch or nextBatch)
-pub type CursorResultCallback =
-    extern "C" fn(success: bool, cursor_handle: u64, exhausted: bool, data: *const BsonBytes);
+pub type CursorResultCallback = extern "C" fn(
+    userdata: *mut std::ffi::c_void,
+    success: bool,
+    cursor_handle: u64,
+    exhausted: bool,
+    data: *const BsonBytes,
+);
 
 /// Callback for getMore operations
 ///
 /// # Parameters
+/// * `userdata` - Opaque pointer passed through from the caller (for closure context)
 /// * `success` - Whether the operation succeeded
 /// * `exhausted` - Whether the cursor is exhausted (no more batches)
 /// * `data` - BSON bytes for the nextBatch
-pub type GetMoreResultCallback =
-    extern "C" fn(success: bool, exhausted: bool, data: *const BsonBytes);
+pub type GetMoreResultCallback = extern "C" fn(
+    userdata: *mut std::ffi::c_void,
+    success: bool,
+    exhausted: bool,
+    data: *const BsonBytes,
+);
 
 /// Opaque client handle
 /// Contains the actual MongoDB Rust driver client, session pool, and cursor manager
