@@ -170,12 +170,57 @@ Example:
 void onInsertResult(Pointer resultPtr) {
     InsertOneResult result = new InsertOneResult(resultPtr);
     // Copy the inserted_id bytes into a Java BsonValue
-    this.insertedId = parseBsonBytes(result.inserted_id);
+    this.insertedId = parseBson(result.inserted_id);
     // After this method returns, resultPtr is invalid
 }
 ```
 
-## Opaque Pointer Types
+## Core FFI Types
+
+### BSON Types
+
+Two types for passing BSON across FFI:
+
+```rust
+/// Raw BSON document - the common case (filters, updates, results, batches)
+#[repr(C)]
+pub struct Bson {
+    pub data: *const u8,
+    pub len: usize,
+}
+
+/// Any BSON value with explicit type byte (for inserted_id, comment, hint, etc.)
+#[repr(C)]
+pub struct BsonValue {
+    pub data: *const u8,
+    pub len: usize,
+    pub bson_type: u8,  // BSON type: 0x01=double, 0x02=string, 0x07=objectid, etc.
+}
+```
+
+**Why two types?**
+
+BSON only supports documents at the top level - there's no concept of a standalone typed value.
+The spec defines elements as `type + key + value`, so the type byte is bound to a key name.
+This means a standalone `ObjectId` or `String` has no self-describing representation.
+
+Options considered:
+1. **Single type, wrap everything in documents** (`{ "": value }`) - works but feels hacky
+2. **Single type with type byte always** - wasteful for the 90%+ document case
+3. **Two types** - `Bson` for documents (common), `BsonValue` for arbitrary values (rare)
+
+We chose option 3. Most FFI calls pass documents (filters, updates, results), so `Bson` keeps
+those simple. The few fields that can be any type (`inserted_id`, `comment`, `hint`) use
+`BsonValue` with an explicit type byte so the receiver knows how to parse.
+
+**When to use which:**
+- `Bson` - documents, filters, updates, pipelines, batches (arrays wrapped as `{ "": [...] }`)
+- `BsonValue` - `inserted_id`, `upserted_id`, `comment`, `hint`, or any field that can be an arbitrary BSON type
+
+For input: caller owns the data, must keep alive until callback completes.
+For output: Rust owns the data, valid only during callback invocation.
+
+### Opaque Pointer Types
 
 All managed objects use opaque pointer types (not `u64`) for type safety and clarity:
 
@@ -322,16 +367,14 @@ pub struct ReadPreferenceOptionsFFI {
     /// Mode: 0=primary, 1=primaryPreferred, 2=secondary, 3=secondaryPreferred, 4=nearest
     pub mode: u8,
 
-    /// Tag sets as raw BSON array, nullable. Example: [{"dc": "east"}, {"dc": "west"}]
-    pub tags: *const u8,
-    pub tags_len: usize,
+    /// Tag sets as BSON array wrapped in doc, nullable. Example: [{"dc": "east"}, {"dc": "west"}]
+    pub tags: *const Bson,
 
     /// Max staleness in seconds. -1 = not set
     pub max_staleness_seconds: i64,
 
-    /// Hedge options as raw BSON document, nullable. Example: {"enabled": true}
-    pub hedge: *const u8,
-    pub hedge_len: usize,
+    /// Hedge options as BSON document, nullable. Example: {"enabled": true}
+    pub hedge: *const Bson,
 }
 
 /// Create a read preference. Returns handle (non-zero), or 0 on error.
@@ -447,7 +490,7 @@ pub struct ServerError {
     pub message: *const c_char,         // null-terminated
     pub labels: *const *const c_char,   // error labels (RetryableWriteError, etc.)
     pub labels_len: usize,
-    pub server_response: BsonBytes,     // full raw server response for debugging/future fields
+    pub server_response: Bson,     // full raw server response for debugging/future fields
 }
 
 #[repr(C)]
@@ -456,7 +499,7 @@ pub struct WriteError {
     pub code: i32,
     pub code_name: *const c_char,       // nullable - server doesn't always return
     pub message: *const c_char,
-    pub details: BsonBytes,             // raw BSON errorInfo, empty if none
+    pub details: Bson,             // raw BSON errorInfo, empty if none
 }
 
 #[repr(C)]
@@ -464,7 +507,7 @@ pub struct WriteConcernError {
     pub code: i32,
     pub code_name: *const c_char,       // null-terminated
     pub message: *const c_char,
-    pub details: BsonBytes,             // raw BSON errInfo, empty if none
+    pub details: Bson,             // raw BSON errInfo, empty if none
     pub labels: *const *const c_char,
     pub labels_len: usize,
 }
@@ -475,7 +518,7 @@ pub struct InsertManyError {
     pub write_errors: *const WriteError,
     pub write_errors_len: usize,
     pub write_concern_error: *const WriteConcernError,  // nullable
-    pub inserted_ids: BsonBytes,        // BSON document: { "0": ObjectId, "1": ObjectId, ... }
+    pub inserted_ids: Bson,        // BSON document: { "0": ObjectId, "1": ObjectId, ... }
 }
 
 /// Error from client.bulk_write or collection bulk operations
@@ -620,16 +663,14 @@ pub union ErrorUnion {
 ```rust
 #[repr(C)]
 pub struct InsertOneResult {
-    pub inserted_id: *const u8,      // Raw BSON value
-    pub inserted_id_len: usize,
+    pub inserted_id: BsonValue,       // Any BSON type (ObjectId, String, Int, etc.)
 }
 
 #[repr(C)]
 pub struct UpdateResult {
     pub matched_count: u64,
     pub modified_count: u64,
-    pub upserted_id: *const u8,      // Raw BSON value, nullable
-    pub upserted_id_len: usize,
+    pub upserted_id: *const BsonValue, // nullable (null if no upsert)
 }
 
 #[repr(C)]
@@ -644,10 +685,8 @@ pub struct BulkWriteResult {
     pub modified_count: u64,
     pub deleted_count: u64,
     pub upserted_count: u64,
-    pub inserted_ids: *const u8,     // Raw BSON document {index: id, ...}
-    pub inserted_ids_len: usize,
-    pub upserted_ids: *const u8,     // Raw BSON document {index: id, ...}
-    pub upserted_ids_len: usize,
+    pub inserted_ids: Bson,           // BSON document: { "0": id, "1": id, ... }
+    pub upserted_ids: Bson,           // BSON document: { "0": id, "1": id, ... }
 }
 ```
 
@@ -662,7 +701,7 @@ use a common `CursorResult`. The initial response includes the first batch of do
 pub struct CursorResult {
     pub cursor: *mut Cursor,          // null if exhausted with single batch
     pub exhausted: bool,              // true if no more batches (cursor already closed)
-    pub first_batch: BsonBytes,       // raw BSON array of documents from initial response
+    pub first_batch: Bson,       // raw BSON array of documents from initial response
     pub server_address: *const c_char,
     pub server_port: u16,
 }
@@ -671,8 +710,8 @@ pub struct CursorResult {
 #[repr(C)]
 pub struct ChangeStreamCursorResult {
     pub cursor: *mut ChangeStream,
-    pub first_batch: BsonBytes,       // raw BSON array of change events (usually empty initially)
-    pub resume_token: BsonBytes,      // initial resume token
+    pub first_batch: Bson,       // raw BSON array of change events (usually empty initially)
+    pub resume_token: Bson,      // initial resume token
     pub server_address: *const c_char,
     pub server_port: u16,
 }
@@ -732,7 +771,7 @@ pub type GetMoreResultCallback = extern "C" fn(
     userdata: *mut c_void,
     success: bool,
     exhausted: bool,      // true if no more batches
-    data: *const BsonBytes,
+    data: *const Bson,
 );
 
 /// Change stream operations - exposes resume token
@@ -754,8 +793,8 @@ pub type ChangeStreamGetMoreCallback = extern "C" fn(
     userdata: *mut c_void,
     success: bool,
     exhausted: bool,
-    data: *const BsonBytes,         // batch of change events
-    resume_token: *const BsonBytes, // current resume token (for resuming after disconnect)
+    data: *const Bson,         // batch of change events
+    resume_token: *const Bson, // current resume token (for resuming after disconnect)
 );
 ```
 
@@ -851,12 +890,10 @@ pub extern "C" fn ffi_insert_one(
     ctx: *const OperationContext,
     db_name: *const c_char,           // null-terminated
     coll_name: *const c_char,         // null-terminated
-    document: *const u8,
-    document_len: usize,
+    document: *const Bson,
     // Operation-specific options
     bypass_document_validation: i8,   // -1 = None, 0 = false, 1 = true
-    comment: *const u8,               // Raw BSON value, nullable
-    comment_len: usize,
+    comment: *const BsonValue,        // nullable, any BSON type
     // Async callback
     callback: InsertOneCallback,
     userdata: *mut c_void,
@@ -868,36 +905,28 @@ pub extern "C" fn ffi_update_one(
     ctx: *const OperationContext,
     db_name: *const c_char,
     coll_name: *const c_char,
-    filter: *const u8,
-    filter_len: usize,
-    update: *const u8,
-    update_len: usize,
+    filter: *const Bson,
+    update: *const Bson,
     // Options
     upsert: i8,
-    array_filters: *const u8,         // Raw BSON array, nullable
-    array_filters_len: usize,
-    hint: *const u8,                  // Raw BSON (string or document), nullable
-    hint_len: usize,
-    collation: *const u8,             // Raw BSON document, nullable
-    collation_len: usize,
+    array_filters: *const Bson,       // nullable, BSON array wrapped as doc
+    hint: *const BsonValue,           // nullable, string or document
+    collation: *const Bson,           // nullable
     // Async callback
     callback: UpdateCallback,
     userdata: *mut c_void,
 )
 
-/// Find documents (async) - returns cursor handle for iteration
+/// Find documents (async) - returns cursor with first batch
 pub extern "C" fn ffi_find(
     client: *const MongoClient,
     ctx: *const OperationContext,
     db_name: *const c_char,
     coll_name: *const c_char,
-    filter: *const u8,
-    filter_len: usize,
+    filter: *const Bson,              // nullable
     // Options
-    projection: *const u8,            // nullable
-    projection_len: usize,
-    sort: *const u8,                  // nullable
-    sort_len: usize,
+    projection: *const Bson,          // nullable
+    sort: *const Bson,                // nullable
     limit: i64,                       // -1 = not set
     skip: i64,                        // -1 = not set
     batch_size: i32,                  // -1 = not set
@@ -906,19 +935,17 @@ pub extern "C" fn ffi_find(
     userdata: *mut c_void,
 )
 
-/// Watch for changes (async) - iteration uses mongo_cursor_next
+/// Watch for changes (async) - returns change stream cursor
 pub extern "C" fn ffi_watch(
     client: *const MongoClient,
     ctx: *const OperationContext,
     target_type: u8,                  // 0=client, 1=database, 2=collection
     db_name: *const c_char,           // nullable for client-level watch
     coll_name: *const c_char,         // nullable for database/client-level watch
-    pipeline: *const u8,              // Raw BSON array
-    pipeline_len: usize,
+    pipeline: *const Bson,            // BSON array wrapped as doc
     // Options
     full_document: u8,                // 0=default, 1=updateLookup, etc.
-    start_after: *const u8,           // nullable
-    start_after_len: usize,
+    start_after: *const Bson,         // nullable, resume token
     // Async callback
     callback: ChangeStreamCallback,
     userdata: *mut c_void,
@@ -946,23 +973,17 @@ pub extern "C" fn ffi_bulk_write(
 ```rust
 #[repr(C)]
 pub struct InsertOneModel {
-    pub document: *const u8,
-    pub document_len: usize,
+    pub document: *const Bson,
 }
 
 #[repr(C)]
 pub struct UpdateOneModel {
-    pub filter: *const u8,
-    pub filter_len: usize,
-    pub update: *const u8,
-    pub update_len: usize,
+    pub filter: *const Bson,
+    pub update: *const Bson,
     pub upsert: i8,                   // -1=not set, 0=false, 1=true
-    pub array_filters: *const u8,     // nullable
-    pub array_filters_len: usize,
-    pub collation: *const u8,         // nullable
-    pub collation_len: usize,
-    pub hint: *const u8,              // nullable
-    pub hint_len: usize,
+    pub array_filters: *const Bson,   // nullable
+    pub collation: *const Bson,       // nullable
+    pub hint: *const BsonValue,       // nullable, string or document
 }
 
 #[repr(C)]
