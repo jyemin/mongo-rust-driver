@@ -30,6 +30,151 @@ This creates abstraction leakage:
 4. **Language drivers become thin wrappers** - Map API to FFI, parse results
 5. **No driver changes required** - FFI uses existing `execute_operation` with real `ClientSession`
 
+## MongoClient
+
+The `MongoClient` is an opaque pointer to the Rust client with its Tokio runtime and handle pools.
+
+### Client Options
+
+```rust
+#[repr(C)]
+pub struct ConnectionSettingsFFI {
+    /// Hosts as comma-separated "host:port" pairs (null-terminated)
+    pub hosts: *const c_char,
+    /// Application name (null-terminated, nullable)
+    pub app_name: *const c_char,
+    /// Compressors as comma-separated list (null-terminated, nullable)
+    pub compressors: *const c_char,
+    /// Direct connection flag
+    pub direct_connection: bool,
+    /// Load balanced flag
+    pub load_balanced: bool,
+    /// Max pool size (-1 = not set)
+    pub max_pool_size: i32,
+    /// Min pool size (-1 = not set)
+    pub min_pool_size: i32,
+    /// Max idle time in milliseconds (-1 = not set)
+    pub max_idle_time_ms: i64,
+    /// Connect timeout in milliseconds (-1 = not set)
+    pub connect_timeout_ms: i64,
+    /// Socket timeout in milliseconds (-1 = not set)
+    pub socket_timeout_ms: i64,
+    /// Server selection timeout in milliseconds (-1 = not set)
+    pub server_selection_timeout_ms: i64,
+    /// Local threshold in milliseconds (-1 = not set)
+    pub local_threshold_ms: i64,
+    /// Heartbeat frequency in milliseconds (-1 = not set)
+    pub heartbeat_frequency_ms: i64,
+    /// Replica set name (null-terminated, nullable)
+    pub replica_set: *const c_char,
+    /// Read preference mode (0=primary, 1=primaryPreferred, etc.)
+    pub read_preference_mode: u8,
+    /// SRV service name (null-terminated, nullable)
+    pub srv_service_name: *const c_char,
+    /// SRV max hosts (-1 = not set)
+    pub srv_max_hosts: i32,
+}
+
+#[repr(C)]
+pub struct AuthSettingsFFI {
+    /// Auth mechanism (null-terminated, nullable: "SCRAM-SHA-1", "SCRAM-SHA-256", etc.)
+    pub mechanism: *const c_char,
+    /// Username (null-terminated, nullable)
+    pub username: *const c_char,
+    /// Password (null-terminated, nullable)
+    pub password: *const c_char,
+    /// Auth source database (null-terminated, nullable)
+    pub source: *const c_char,
+}
+
+#[repr(C)]
+pub struct TlsSettingsFFI {
+    /// Enable TLS
+    pub enabled: bool,
+    /// Allow invalid certificates
+    pub allow_invalid_certificates: bool,
+    /// Allow invalid hostnames
+    pub allow_invalid_hostnames: bool,
+    /// CA file path (null-terminated, nullable)
+    pub ca_file: *const c_char,
+    /// Certificate file path (null-terminated, nullable)
+    pub cert_file: *const c_char,
+    /// Certificate key file path (null-terminated, nullable)
+    pub cert_key_file: *const c_char,
+}
+```
+
+### Client Lifecycle
+
+```rust
+/// Create a new MongoClient. Returns pointer on success, null on error.
+/// The client owns a Tokio runtime and all handle pools.
+pub extern "C" fn mongo_client_new(
+    connection_settings: *const ConnectionSettingsFFI,
+    auth_settings: *const AuthSettingsFFI,       // nullable
+    tls_settings: *const TlsSettingsFFI,         // nullable
+) -> *mut MongoClient
+
+/// Destroy a MongoClient. All sessions, cursors, and handles become invalid.
+/// Waits for in-flight operations to complete (up to timeout).
+pub extern "C" fn mongo_client_destroy(
+    client: *mut MongoClient,
+)
+```
+
+### Memory Model
+
+#### Input Data (caller → Rust)
+
+**Input pointers must remain valid until the callback completes.**
+
+- Options structs, BSON bytes, strings passed to FFI functions are **borrowed** by Rust
+- Rust does **not** copy input data - it borrows directly for the lifetime of the operation
+- Caller must keep input data alive until the callback is invoked
+- Caller can free input data after callback returns
+
+Example:
+```java
+// Java allocates filter bytes - must keep alive until callback
+byte[] filter = buildFilter();
+Pointer filterPtr = copyToNative(filter);
+
+// Call FFI - Rust borrows filterPtr (no copy)
+mongo_find(client, db, coll, filterPtr, ..., (result, error) -> {
+    // Process result...
+
+    // Now safe to free input data
+    freeNative(filterPtr);
+});
+```
+
+This avoids copying potentially large documents (filters, pipelines, update docs) while
+maintaining a simple ownership model.
+
+#### Output Data (Rust → caller via callback)
+
+**Callback data is valid only during the callback invocation.**
+
+Result structs, error structs, and their nested pointers (strings, BSON bytes, arrays) are owned by Rust
+and freed immediately after the callback returns. Language drivers must extract/copy any data they need
+to retain before returning from the callback.
+
+This means:
+- **No explicit free functions needed** - Rust manages all memory
+- **Callbacks must not store raw pointers** - Copy data into language-native types
+- **Thread safety** - Callbacks may be invoked from any Tokio worker thread
+
+Example:
+```java
+// In callback - extract data before returning
+void onInsertResult(Pointer resultPtr) {
+    InsertOneResult result = new InsertOneResult(resultPtr);
+    // Copy the inserted_id bytes into a Java BsonValue
+    this.insertedId = parseBsonBytes(result.inserted_id);
+    // After this method returns, resultPtr is invalid
+}
+```
+
 ## Sessions
 
 Sessions are **opaque handles** (`u64`) backed by real `ClientSession` objects stored in Rust.
@@ -256,33 +401,51 @@ pub struct OperationContext {
 
 Errors use a tagged union. Language drivers switch on `error_type` to produce idiomatic exceptions.
 
+The error types are designed to map directly from Rust's `Error` and `ErrorKind` types, providing
+all information the server returns without loss.
+
 ### Server Errors
 
 ```rust
 #[repr(C)]
 pub struct ServerError {
     pub code: i32,
-    pub code_name: *const c_char,     // null-terminated
-    pub message: *const c_char,       // null-terminated
-    pub labels: *const *const c_char, // error labels (RetryableWriteError, etc.)
+    pub code_name: *const c_char,       // null-terminated
+    pub message: *const c_char,         // null-terminated
+    pub labels: *const *const c_char,   // error labels (RetryableWriteError, etc.)
     pub labels_len: usize,
+    pub server_response: BsonBytes,     // full raw server response for debugging/future fields
 }
 
 #[repr(C)]
 pub struct WriteError {
     pub index: u32,
     pub code: i32,
+    pub code_name: *const c_char,       // nullable - server doesn't always return
     pub message: *const c_char,
+    pub details: BsonBytes,             // raw BSON errorInfo, empty if none
 }
 
 #[repr(C)]
 pub struct WriteConcernError {
     pub code: i32,
+    pub code_name: *const c_char,       // null-terminated
     pub message: *const c_char,
+    pub details: BsonBytes,             // raw BSON errInfo, empty if none
     pub labels: *const *const c_char,
     pub labels_len: usize,
 }
 
+/// Error from insert_many with partial success info
+#[repr(C)]
+pub struct InsertManyError {
+    pub write_errors: *const WriteError,
+    pub write_errors_len: usize,
+    pub write_concern_error: *const WriteConcernError,  // nullable
+    pub inserted_ids: BsonBytes,        // BSON document: { "0": ObjectId, "1": ObjectId, ... }
+}
+
+/// Error from client.bulk_write or collection bulk operations
 #[repr(C)]
 pub struct BulkWriteError {
     pub write_errors: *const WriteError,
@@ -321,28 +484,101 @@ pub struct AuthError {
 pub struct InvalidArgumentError {
     pub message: *const c_char,
 }
+
+#[repr(C)]
+pub struct TransactionError {
+    pub message: *const c_char,
+    pub labels: *const *const c_char,   // TransientTransactionError, UnknownTransactionCommitResult
+    pub labels_len: usize,
+}
+
+#[repr(C)]
+pub struct IncompatibleServerError {
+    pub message: *const c_char,
+}
+
+#[repr(C)]
+pub struct InvalidResponseError {
+    pub message: *const c_char,
+}
+
+#[repr(C)]
+pub struct ChangeStreamError {
+    pub message: *const c_char,
+    pub resumable: bool,                // whether the change stream can be resumed
+}
+
+#[repr(C)]
+pub struct ShutdownError {
+    // Client has been shut down
+}
 ```
 
 ### ErrorFFI (Tagged Union)
 
 ```rust
+/// Error type discriminator
+#[repr(u8)]
+pub enum ErrorType {
+    Server = 0,
+    InsertMany = 1,
+    BulkWrite = 2,
+    Io = 3,
+    ServerSelection = 4,
+    Timeout = 5,
+    Auth = 6,
+    InvalidArgument = 7,
+    Transaction = 8,
+    IncompatibleServer = 9,
+    InvalidResponse = 10,
+    ChangeStream = 11,
+    Shutdown = 12,
+}
+
 #[repr(C)]
 pub struct ErrorFFI {
-    pub error_type: u8,  // 0=Server, 1=BulkWrite, 2=Io, 3=ServerSelection, 4=Timeout, 5=Auth, 6=InvalidArgument
+    pub error_type: u8,
     pub error: ErrorUnion,
 }
 
 #[repr(C)]
 pub union ErrorUnion {
     pub server: *const ServerError,
+    pub insert_many: *const InsertManyError,
     pub bulk_write: *const BulkWriteError,
     pub io: *const IoError,
     pub server_selection: *const ServerSelectionError,
     pub timeout: *const TimeoutError,
     pub auth: *const AuthError,
     pub invalid_argument: *const InvalidArgumentError,
+    pub transaction: *const TransactionError,
+    pub incompatible_server: *const IncompatibleServerError,
+    pub invalid_response: *const InvalidResponseError,
+    pub change_stream: *const ChangeStreamError,
+    pub shutdown: *const ShutdownError,
 }
 ```
+
+### Mapping from Rust ErrorKind
+
+| Rust ErrorKind | FFI ErrorType | Notes |
+|----------------|---------------|-------|
+| `Command(CommandError)` | `Server` | Server command errors |
+| `Write(WriteFailure)` | `Server` | Single write errors |
+| `InsertMany(InsertManyError)` | `InsertMany` | Partial insert success |
+| `BulkWrite(BulkWriteError)` | `BulkWrite` | Client bulk write errors |
+| `Io(_)` | `Io` | Network/IO errors |
+| `ServerSelection { .. }` | `ServerSelection` | No suitable server |
+| `Authentication { .. }` | `Auth` | Auth failures |
+| `InvalidArgument { .. }` | `InvalidArgument` | Bad input |
+| `Transaction { .. }` | `Transaction` | Transaction errors |
+| `IncompatibleServer { .. }` | `IncompatibleServer` | Server version mismatch |
+| `InvalidResponse { .. }` | `InvalidResponse` | Malformed server reply |
+| `MissingResumeToken` | `ChangeStream` | Change stream errors |
+| `Shutdown` | `Shutdown` | Client shut down |
+| `ConnectionPoolCleared { .. }` | `Io` | Map to IO error |
+| `SessionsNotSupported` | `IncompatibleServer` | Map to incompatible |
+| `BsonSerialization/_` | `InvalidArgument` | Map to invalid arg |
 
 ## Results
 
