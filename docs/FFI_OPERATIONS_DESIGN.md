@@ -653,17 +653,26 @@ pub struct BulkWriteResult {
 
 ### Cursor Results
 
+All cursor-returning operations (find, aggregate, listCollections, listDatabases, listIndexes, etc.)
+use a common `CursorResult`. The initial response includes the first batch of documents.
+
 ```rust
+/// Common result for all cursor-returning operations
 #[repr(C)]
-pub struct FindResult {
-    pub cursor_handle: *mut Cursor,
+pub struct CursorResult {
+    pub cursor: *mut Cursor,          // null if exhausted with single batch
+    pub exhausted: bool,              // true if no more batches (cursor already closed)
+    pub first_batch: BsonBytes,       // raw BSON array of documents from initial response
     pub server_address: *const c_char,
     pub server_port: u16,
 }
 
+/// Change streams have additional resume token
 #[repr(C)]
-pub struct ChangeStreamResult {
-    pub cursor_handle: *mut ChangeStream,
+pub struct ChangeStreamCursorResult {
+    pub cursor: *mut ChangeStream,
+    pub first_batch: BsonBytes,       // raw BSON array of change events (usually empty initially)
+    pub resume_token: BsonBytes,      // initial resume token
     pub server_address: *const c_char,
     pub server_port: u16,
 }
@@ -699,21 +708,22 @@ pub type BulkWriteCallback = extern "C" fn(
 
 ## Cursors
 
-Cursors are managed via handles. Operations that return cursors (find, aggregate, watch) return a `cursor_handle` in their result struct.
+Cursors are opaque pointers. Operations that return cursors (find, aggregate, watch) include
+the cursor pointer and first batch in their result struct.
 
 ```rust
 /// Get more results from a cursor (async).
 pub extern "C" fn mongo_cursor_get_more(
     client: *mut MongoClient,
-    cursor_handle: *mut Cursor,
+    cursor: *mut Cursor,
     userdata: *mut c_void,
     callback: GetMoreResultCallback,
 )
 
-/// Close a cursor (async).
+/// Close a cursor (async). Also called automatically when cursor is exhausted.
 pub extern "C" fn mongo_cursor_close(
     client: *mut MongoClient,
-    cursor_handle: *mut Cursor,
+    cursor: *mut Cursor,
     userdata: *mut c_void,
     callback: SingleResultCallback,
 )
