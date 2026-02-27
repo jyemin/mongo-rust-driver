@@ -175,9 +175,42 @@ void onInsertResult(Pointer resultPtr) {
 }
 ```
 
+## Opaque Pointer Types
+
+All managed objects use opaque pointer types (not `u64`) for type safety and clarity:
+
+```rust
+/// Opaque session - points to ClientSession in Rust
+#[repr(C)]
+pub struct Session { _private: [u8; 0] }
+
+/// Opaque read preference
+#[repr(C)]
+pub struct ReadPreference { _private: [u8; 0] }
+
+/// Opaque write concern
+#[repr(C)]
+pub struct WriteConcern { _private: [u8; 0] }
+
+/// Opaque read concern
+#[repr(C)]
+pub struct ReadConcern { _private: [u8; 0] }
+
+/// Opaque cursor
+#[repr(C)]
+pub struct Cursor { _private: [u8; 0] }
+
+/// Opaque change stream cursor
+#[repr(C)]
+pub struct ChangeStream { _private: [u8; 0] }
+```
+
+Null pointers indicate "not set" (use default). Pointers are obtained via FFI functions
+and must be destroyed when no longer needed.
+
 ## Sessions
 
-Sessions are **opaque handles** (`u64`) backed by real `ClientSession` objects stored in Rust.
+Sessions are **opaque pointers** (`*mut Session`) backed by real `ClientSession` objects stored in Rust.
 Transaction state is managed entirely within the session - language drivers don't track it.
 
 ### Session Options
@@ -224,12 +257,12 @@ pub struct TransactionOptionsFFI {
 pub extern "C" fn mongo_session_start(
     client: *mut MongoClient,
     options: *const SessionOptionsFFI,  // nullable
-) -> u64
+) -> *mut Session
 
 /// End a session. The session handle becomes invalid after this call.
 pub extern "C" fn mongo_session_end(
     client: *mut MongoClient,
-    session_handle: u64,
+    session_handle: *mut Session,
 )
 ```
 
@@ -246,7 +279,7 @@ pub type TransactionCallback = extern "C" fn(
 /// Start a transaction on the session.
 pub extern "C" fn mongo_session_start_transaction(
     client: *mut MongoClient,
-    session_handle: u64,
+    session_handle: *mut Session,
     options: *const TransactionOptionsFFI,  // nullable
     callback: TransactionCallback,
     userdata: *mut c_void,
@@ -255,7 +288,7 @@ pub extern "C" fn mongo_session_start_transaction(
 /// Commit the current transaction.
 pub extern "C" fn mongo_session_commit_transaction(
     client: *mut MongoClient,
-    session_handle: u64,
+    session_handle: *mut Session,
     callback: TransactionCallback,
     userdata: *mut c_void,
 )
@@ -263,7 +296,7 @@ pub extern "C" fn mongo_session_commit_transaction(
 /// Abort the current transaction.
 pub extern "C" fn mongo_session_abort_transaction(
     client: *mut MongoClient,
-    session_handle: u64,
+    session_handle: *mut Session,
     callback: TransactionCallback,
     userdata: *mut c_void,
 )
@@ -281,7 +314,7 @@ pub extern "C" fn mongo_session_abort_transaction(
 
 ## Read Preference
 
-Read preferences are **opaque handles** (`u64`). Create once, reuse across operations.
+Read preferences are **opaque pointers** (`*const ReadPreference`). Create once, reuse across operations.
 
 ```rust
 #[repr(C)]
@@ -305,18 +338,18 @@ pub struct ReadPreferenceOptionsFFI {
 pub extern "C" fn mongo_read_preference_create(
     client: *mut MongoClient,
     options: *const ReadPreferenceOptionsFFI,
-) -> u64
+) -> *mut ReadPreference
 
 /// Destroy a read preference handle.
 pub extern "C" fn mongo_read_preference_destroy(
     client: *mut MongoClient,
-    handle: u64,
+    handle: *mut ReadPreference,
 )
 ```
 
 ## Write Concern
 
-Write concerns are **opaque handles** (`u64`). Create once, reuse across operations.
+Write concerns are **opaque pointers** (`*const WriteConcern`). Create once, reuse across operations.
 
 ```rust
 #[repr(C)]
@@ -340,18 +373,18 @@ pub struct WriteConcernOptionsFFI {
 pub extern "C" fn mongo_write_concern_create(
     client: *mut MongoClient,
     options: *const WriteConcernOptionsFFI,
-) -> u64
+) -> *mut WriteConcern
 
 /// Destroy a write concern handle.
 pub extern "C" fn mongo_write_concern_destroy(
     client: *mut MongoClient,
-    handle: u64,
+    handle: *mut WriteConcern,
 )
 ```
 
 ## Read Concern
 
-Read concerns are **opaque handles** (`u64`). Create once, reuse across operations.
+Read concerns are **opaque pointers** (`*const ReadConcern`). Create once, reuse across operations.
 
 ```rust
 #[repr(C)]
@@ -364,12 +397,12 @@ pub struct ReadConcernOptionsFFI {
 pub extern "C" fn mongo_read_concern_create(
     client: *mut MongoClient,
     options: *const ReadConcernOptionsFFI,
-) -> u64
+) -> *mut ReadConcern
 
 /// Destroy a read concern handle.
 pub extern "C" fn mongo_read_concern_destroy(
     client: *mut MongoClient,
-    handle: u64,
+    handle: *mut ReadConcern,
 )
 ```
 
@@ -380,17 +413,17 @@ Passed to every operation. Contains handles for session, read preference, write 
 ```rust
 #[repr(C)]
 pub struct OperationContext {
-    /// Session handle (0 = no session)
-    pub session_handle: u64,
+    /// Session handle (null = no session)
+    pub session_handle: *const Session,
 
-    /// Read preference handle (0 = use default/inherit from session)
-    pub read_preference_handle: u64,
+    /// Read preference handle (null = use default/inherit from session)
+    pub read_preference_handle: *const ReadPreference,
 
-    /// Write concern handle (0 = use default/inherit from session)
-    pub write_concern_handle: u64,
+    /// Write concern handle (null = use default/inherit from session)
+    pub write_concern_handle: *const WriteConcern,
 
-    /// Read concern handle (0 = use default/inherit from session)
-    pub read_concern_handle: u64,
+    /// Read concern handle (null = use default/inherit from session)
+    pub read_concern_handle: *const ReadConcern,
 
     /// Timeout in milliseconds (CSOT). -1 = not set (use client default)
     pub timeout_ms: i64,
@@ -623,14 +656,14 @@ pub struct BulkWriteResult {
 ```rust
 #[repr(C)]
 pub struct FindResult {
-    pub cursor_handle: u64,
+    pub cursor_handle: *mut Cursor,
     pub server_address: *const c_char,
     pub server_port: u16,
 }
 
 #[repr(C)]
 pub struct ChangeStreamResult {
-    pub cursor_handle: u64,
+    pub cursor_handle: *mut ChangeStream,
     pub server_address: *const c_char,
     pub server_port: u16,
 }
@@ -672,7 +705,7 @@ Cursors are managed via handles. Operations that return cursors (find, aggregate
 /// Get more results from a cursor (async).
 pub extern "C" fn mongo_cursor_get_more(
     client: *mut MongoClient,
-    cursor_handle: u64,
+    cursor_handle: *mut Cursor,
     userdata: *mut c_void,
     callback: GetMoreResultCallback,
 )
@@ -680,7 +713,7 @@ pub extern "C" fn mongo_cursor_get_more(
 /// Close a cursor (async).
 pub extern "C" fn mongo_cursor_close(
     client: *mut MongoClient,
-    cursor_handle: u64,
+    cursor_handle: *mut Cursor,
     userdata: *mut c_void,
     callback: SingleResultCallback,
 )
@@ -691,6 +724,103 @@ pub type GetMoreResultCallback = extern "C" fn(
     exhausted: bool,      // true if no more batches
     data: *const BsonBytes,
 );
+
+/// Change stream operations - exposes resume token
+pub extern "C" fn mongo_change_stream_get_more(
+    client: *mut MongoClient,
+    change_stream: *mut ChangeStream,
+    userdata: *mut c_void,
+    callback: ChangeStreamGetMoreCallback,
+)
+
+pub extern "C" fn mongo_change_stream_close(
+    client: *mut MongoClient,
+    change_stream: *mut ChangeStream,
+    userdata: *mut c_void,
+    callback: SingleResultCallback,
+)
+
+pub type ChangeStreamGetMoreCallback = extern "C" fn(
+    userdata: *mut c_void,
+    success: bool,
+    exhausted: bool,
+    data: *const BsonBytes,         // batch of change events
+    resume_token: *const BsonBytes, // current resume token (for resuming after disconnect)
+);
+```
+
+## Logging
+
+Logging bridges Rust's `tracing` to language callbacks (e.g., Java SLF4J).
+Initialize once per process with per-component log levels.
+
+```rust
+/// Log level constants
+pub const LOG_LEVEL_DEBUG: i32 = 0;
+pub const LOG_LEVEL_INFO: i32 = 1;
+pub const LOG_LEVEL_WARN: i32 = 2;
+
+/// A single log field (name/value pair)
+#[repr(C)]
+pub struct LogField {
+    pub name: *const c_char,
+    pub value: *const c_char,
+}
+
+/// Log event structure passed to callback
+#[repr(C)]
+pub struct LogEvent {
+    /// Log level: 0=DEBUG, 1=INFO
+    pub level: i32,
+    /// Tracing target: "mongodb::command", "mongodb::connection", etc.
+    pub target: *const c_char,
+    /// Message identifier: "Command started", "Connection pool created", etc.
+    pub message: *const c_char,
+    /// Number of fields
+    pub field_count: i32,
+    /// Array of fields (name/value pairs)
+    pub fields: *const LogField,
+}
+
+/// Callback type for log events
+pub type LogCallback = extern "C" fn(userdata: *mut c_void, event: *const LogEvent);
+
+/// Initialize logging globally with per-component log levels.
+/// Call once at first client creation. Levels can be updated at runtime.
+///
+/// Log levels: 0 = DEBUG, 1 = INFO, 2 = WARN (effectively disabled)
+pub extern "C" fn mongo_init_logging(
+    command_level: i32,
+    connection_level: i32,
+    server_selection_level: i32,
+    topology_level: i32,
+    userdata: *mut c_void,
+    callback: LogCallback,
+)
+
+/// Update log levels at runtime (e.g., when SLF4J config changes)
+pub extern "C" fn mongo_update_log_levels(
+    command_level: i32,
+    connection_level: i32,
+    server_selection_level: i32,
+    topology_level: i32,
+)
+```
+
+## Tokio Runtime
+
+A single Tokio runtime is shared across all `MongoClient` instances in a process.
+The runtime is created automatically on first client creation and destroyed when
+the last client is destroyed (reference-counted internally).
+
+This avoids:
+- The overhead of creating hundreds of runtimes when applications create many clients
+- Explicit runtime lifecycle management by host languages
+
+```rust
+// No explicit FFI functions needed - runtime is managed internally:
+// - First mongo_client_new() → creates runtime
+// - Last mongo_client_destroy() → shuts down runtime (waits for in-flight ops)
 ```
 
 ## Operations
