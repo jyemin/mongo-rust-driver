@@ -116,9 +116,374 @@ Because we store real `ClientSession` objects and use the existing `execute_oper
 
 ---
 
+## Phase 0: Raw Document Support in Operations
+
+The driver's operation layer is **partially raw-friendly**. Some operations accept `RawDocumentBuf`,
+others require typed `Document` and convert internally. For FFI efficiency, we should add raw
+constructors to avoid Document → RawDocumentBuf → Document round-trips.
+
+### Current State - Full Analysis
+
+| Operation | Filter/Query | Document/Pipeline | Status |
+|-----------|--------------|-------------------|--------|
+| **Insert** | N/A | `Vec<&RawDocument>` | ✅ Ready |
+| **Update** | `Document` | `RawDocumentBuf` (replace) | ⚠️ Filter needs raw |
+| **Delete** | `Document` | N/A | ❌ Filter needs raw |
+| **Find** | `Document` | N/A | ❌ Filter needs raw |
+| **FindAndModify** | `Document` | `RawDocumentBuf` | ⚠️ Query needs raw |
+| **Aggregate** | N/A | `Vec<Document>` | ❌ Pipeline needs raw |
+| **CountDocuments** | `Document` | N/A | ❌ Uses Aggregate internally |
+| **Distinct** | `Document` (filter) | N/A | ❌ Filter needs raw |
+| **RunCommand** | N/A | `RawDocumentBuf` | ✅ Ready |
+| **RunCommandRaw** | N/A | `RawDocumentBuf` | ✅ Ready |
+| **GetMore** | N/A | N/A | ✅ Ready (no user docs) |
+| **ListDatabases** | N/A | N/A | ✅ Ready (no user docs) |
+| **ListCollections** | `Document` (filter in options) | N/A | ⚠️ Filter in options |
+| **CreateIndexes** | N/A | `Vec<IndexModel>` (keys: Document) | ⚠️ Keys are Document |
+| **DropIndexes** | N/A | N/A | ✅ Ready (no user docs) |
+| **BulkWrite (client)** | `Document` (in WriteModel) | `Document` (in WriteModel) | ❌ WriteModel uses Document |
+
+### WriteModel Analysis (Client Bulk Write)
+
+The `WriteModel` enum used by client-level bulk write contains typed `Document` fields:
+
+```rust
+pub struct InsertOneModel {
+    pub document: Document,        // ❌ Needs RawDocumentBuf
+}
+pub struct UpdateOneModel {
+    pub filter: Document,          // ❌ Needs RawDocumentBuf
+    pub update: UpdateModifications,  // Already supports raw via RawBson
+}
+pub struct ReplaceOneModel {
+    pub filter: Document,          // ❌ Needs RawDocumentBuf
+    pub replacement: Document,     // ❌ Needs RawDocumentBuf
+}
+pub struct DeleteOneModel {
+    pub filter: Document,          // ❌ Needs RawDocumentBuf
+}
+```
+
+### Changes Required
+
+Add `_raw` constructor variants to operations that accept `RawDocumentBuf` instead of `Document`:
+
+#### 0.1 Find - Add raw filter support
+
+**File:** `driver/src/operation/find.rs`
+
+```rust
+// Existing
+pub(crate) struct Find {
+    target: Collection<Document>,
+    filter: Document,  // ❌ Typed
+    options: Option<Box<FindOptions>>,
+}
+
+// Add enum to support both
+pub(crate) enum FilterDoc {
+    Typed(Document),
+    Raw(RawDocumentBuf),
+}
+
+pub(crate) struct Find {
+    target: Collection<Document>,
+    filter: FilterDoc,  // ✅ Either typed or raw
+    options: Option<Box<FindOptions>>,
+}
+
+impl Find {
+    // Existing constructor (for backward compat)
+    pub(crate) fn new(..., filter: Document, ...) -> Self { ... }
+
+    // New raw constructor (for FFI)
+    pub(crate) fn new_raw(..., filter: RawDocumentBuf, ...) -> Self { ... }
+}
+```
+
+In `build()`, use the filter directly if raw:
+```rust
+fn build(&mut self, ...) -> Result<Command> {
+    // ...
+    let raw_filter = match &self.filter {
+        FilterDoc::Typed(doc) => RawDocumentBuf::try_from(doc)?,
+        FilterDoc::Raw(raw) => raw.clone(),  // Zero-copy if we take ownership
+    };
+    body.append(cstr!("filter"), raw_filter);
+    // ...
+}
+```
+
+#### 0.2 Delete - Add raw filter support
+
+**File:** `driver/src/operation/delete.rs`
+
+Same pattern as Find. Currently uses `doc!` macro which creates typed Document.
+Refactor to build raw command directly.
+
+```rust
+pub(crate) struct Delete {
+    target: Collection<Document>,
+    filter: FilterDoc,  // Change from Document
+    // ...
+}
+
+impl Delete {
+    pub(crate) fn new_raw(
+        target: Collection<Document>,
+        filter: RawDocumentBuf,
+        limit: Option<u32>,
+        options: Option<DeleteOptions>,
+    ) -> Self { ... }
+}
+```
+
+#### 0.3 Update - Add raw filter support
+
+**File:** `driver/src/operation/update.rs`
+
+Filter is currently `Document`. Add raw variant:
+
+```rust
+pub(crate) struct Update {
+    target: Collection<Document>,
+    filter: FilterDoc,  // Change from Document
+    update: UpdateOrReplace,
+    // ...
+}
+
+impl Update {
+    pub(crate) fn with_update_raw(
+        target: Collection<Document>,
+        filter: RawDocumentBuf,
+        update: UpdateModifications,
+        multi: bool,
+        options: Option<UpdateOptions>,
+    ) -> Self { ... }
+}
+```
+
+#### 0.4 Aggregate - Add raw pipeline support
+
+**File:** `driver/src/operation/aggregate.rs`
+
+Pipeline is currently `Vec<Document>`. Add raw variant:
+
+```rust
+pub(crate) enum Pipeline {
+    Typed(Vec<Document>),
+    Raw(RawArrayBuf),
+}
+
+pub(crate) struct Aggregate {
+    target: OperationTarget,
+    pipeline: Pipeline,
+    options: Option<AggregateOptions>,
+}
+
+impl Aggregate {
+    pub(crate) fn new_raw(
+        target: OperationTarget,
+        pipeline: RawArrayBuf,
+        options: Option<AggregateOptions>,
+    ) -> Self { ... }
+}
+```
+
+#### 0.5 FindAndModify - Add raw query support
+
+**File:** `driver/src/operation/find_and_modify.rs`
+
+Query is currently `Document`. The update/replacement already supports `RawDocumentBuf`.
+
+```rust
+pub(crate) struct FindAndModify {
+    // ...
+    query: FilterDoc,  // Change from Document
+    // ...
+}
+```
+
+#### 0.6 CountDocuments - Uses Aggregate
+
+**File:** `driver/src/operation/count_documents.rs`
+
+`CountDocuments` wraps `Aggregate` internally. Once Aggregate supports raw pipelines,
+we can add a `new_raw()` constructor that builds a raw `$match` stage.
+
+```rust
+impl CountDocuments {
+    pub(crate) fn new_raw(
+        coll: &Collection<Document>,
+        filter: RawDocumentBuf,  // Raw filter
+        options: Option<CountOptions>,
+    ) -> Result<Self> {
+        // Build $match stage with raw filter
+        let match_stage = rawdoc! { "$match": filter };
+        // ... build raw pipeline
+    }
+}
+```
+
+#### 0.7 Distinct - Add raw filter support
+
+**File:** `driver/src/operation/distinct.rs`
+
+Filter is currently `Option<Document>`.
+
+```rust
+pub(crate) struct Distinct {
+    // ...
+    filter: Option<FilterDoc>,  // Change from Option<Document>
+    // ...
+}
+```
+
+#### 0.8 Client Bulk Write - Add raw support to WriteModel
+
+**File:** `driver/src/client/options/bulk_write.rs`
+
+The `WriteModel` enum contains `Document` fields throughout. Add raw variants:
+
+```rust
+/// Enum to hold either typed or raw document
+pub(crate) enum DocOrRaw {
+    Typed(Document),
+    Raw(RawDocumentBuf),
+}
+
+impl From<Document> for DocOrRaw {
+    fn from(doc: Document) -> Self { Self::Typed(doc) }
+}
+
+impl From<RawDocumentBuf> for DocOrRaw {
+    fn from(raw: RawDocumentBuf) -> Self { Self::Raw(raw) }
+}
+
+// Update models to use DocOrRaw internally
+pub struct InsertOneModel {
+    pub namespace: Namespace,
+    pub(crate) document: DocOrRaw,  // Was: Document
+}
+
+impl InsertOneModel {
+    pub fn new(namespace: Namespace, document: Document) -> Self { ... }
+    pub fn new_raw(namespace: Namespace, document: RawDocumentBuf) -> Self { ... }
+}
+
+pub struct UpdateOneModel {
+    pub namespace: Namespace,
+    pub(crate) filter: DocOrRaw,      // Was: Document
+    pub update: UpdateModifications,   // Already supports raw via RawBson
+    // ... other fields
+}
+
+impl UpdateOneModel {
+    pub fn new(..., filter: Document, ...) -> Self { ... }
+    pub fn new_raw(..., filter: RawDocumentBuf, ...) -> Self { ... }
+}
+
+pub struct ReplaceOneModel {
+    pub namespace: Namespace,
+    pub(crate) filter: DocOrRaw,       // Was: Document
+    pub(crate) replacement: DocOrRaw,  // Was: Document
+    // ...
+}
+
+pub struct DeleteOneModel {
+    pub namespace: Namespace,
+    pub(crate) filter: DocOrRaw,  // Was: Document
+    // ...
+}
+
+// Same pattern for UpdateManyModel, DeleteManyModel
+```
+
+**Serialization:** Update the serde `Serialize` impl to handle `DocOrRaw`:
+
+```rust
+impl Serialize for DocOrRaw {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            DocOrRaw::Typed(doc) => doc.serialize(serializer),
+            DocOrRaw::Raw(raw) => raw.serialize(serializer),
+        }
+    }
+}
+```
+
+#### 0.9 ListCollections - Filter in options
+
+**File:** `driver/src/db/options.rs`
+
+The filter is inside `ListCollectionsOptions`:
+
+```rust
+pub struct ListCollectionsOptions {
+    pub filter: Option<Document>,  // Change to Option<DocOrRaw>
+    // ...
+}
+```
+
+#### 0.10 CreateIndexes - Keys in IndexModel
+
+**File:** `driver/src/index.rs`
+
+The `IndexModel` has `keys: Document`:
+
+```rust
+pub struct IndexModel {
+    pub keys: Document,  // Change to DocOrRaw
+    // ...
+}
+
+impl IndexModel {
+    pub fn new_raw(keys: RawDocumentBuf, options: Option<IndexOptions>) -> Self { ... }
+}
+```
+
+### Implementation Approach
+
+Two options:
+
+**Option A: FilterDoc enum (shown above)**
+- Add enum that holds either `Document` or `RawDocumentBuf`
+- Minimal changes to struct layout
+- Small runtime branch in `build()`
+
+**Option B: Generic over filter type**
+- `Find<F: IntoRawFilter>` with trait
+- More type-safe but larger API surface change
+- Affects action layer
+
+**Recommendation:** Option A is simpler and sufficient for FFI needs.
+
+### Files Changed in Phase 0
+
+| File | Changes |
+|------|---------|
+| `driver/src/operation/find.rs` | Add `FilterDoc` enum, `new_raw()` constructor |
+| `driver/src/operation/delete.rs` | Add `FilterDoc`, `new_raw()` |
+| `driver/src/operation/update.rs` | Add `FilterDoc`, `with_update_raw()` |
+| `driver/src/operation/aggregate.rs` | Add `Pipeline` enum, `new_raw()` |
+| `driver/src/operation/find_and_modify.rs` | Add `FilterDoc` for query |
+| `driver/src/operation/count_documents.rs` | Add `new_raw()` with raw filter |
+| `driver/src/operation/distinct.rs` | Add `FilterDoc` for filter |
+| `driver/src/operation/mod.rs` | Add `FilterDoc`, `Pipeline`, `DocOrRaw` types |
+| `driver/src/client/options/bulk_write.rs` | Add `DocOrRaw` to WriteModel variants, `new_raw()` constructors |
+| `driver/src/db/options.rs` | Add `DocOrRaw` for ListCollections filter |
+| `driver/src/index.rs` | Add `DocOrRaw` for IndexModel keys, `new_raw()` |
+
+### Testing Strategy - Phase 0
+- Unit tests: verify raw constructors produce identical commands to typed constructors
+- Roundtrip tests: `Document` → `RawDocumentBuf` → operation → command bytes should match
+- Integration tests: operations with raw filters work against real MongoDB
+
+---
+
 ## Phase 1: Handle Pools & Core FFI Types
 
-**Complexity**: Medium | **Estimated Effort**: 5-7 days
+**Complexity**: Medium
 
 This phase creates the handle pool infrastructure for sessions, read preferences, write concerns,
 and read concerns, plus the core error and result types.
@@ -335,7 +700,7 @@ pub struct OperationContext {
 
 ## Phase 2: Core CRUD Operations
 
-**Complexity**: Medium | **Estimated Effort**: 5-7 days
+**Complexity**: Medium
 
 Operations use `db_name` and `coll_name` strings (null-terminated `*const c_char`) to specify the namespace,
 rather than opaque collection handles. This is simpler and matches the design document.
@@ -658,7 +1023,7 @@ pub extern "C" fn ffi_find_one(
 
 ## Phase 3: Aggregate, Count, Distinct & Cursor Operations
 
-**Complexity**: Medium | **Estimated Effort**: 4-5 days
+**Complexity**: Medium
 
 ### 3.1 Create `driver/src/ffi/operations/aggregate.rs`
 
@@ -808,7 +1173,7 @@ pub extern "C" fn ffi_cursor_close(
 
 ## Phase 4: Find-and-Modify Operations
 
-**Complexity**: Medium | **Estimated Effort**: 3-4 days
+**Complexity**: Medium
 
 ### 4.1 Create `driver/src/ffi/operations/find_and_modify.rs`
 
@@ -890,7 +1255,7 @@ pub extern "C" fn ffi_find_one_and_delete(
 
 ## Phase 5: Bulk Write Operations
 
-**Complexity**: High | **Estimated Effort**: 5-7 days
+**Complexity**: High
 
 ### 5.1 Create `driver/src/ffi/operations/bulk_write.rs`
 
@@ -992,7 +1357,7 @@ pub extern "C" fn ffi_client_bulk_write(
 
 ## Phase 6: Index & Collection Management
 
-**Complexity**: Medium | **Estimated Effort**: 4-5 days
+**Complexity**: Medium
 
 ### 6.1 Create `driver/src/ffi/operations/indexes.rs`
 
@@ -1144,7 +1509,7 @@ pub extern "C" fn ffi_run_command(
 
 ## Phase 7: Change Streams
 
-**Complexity**: Medium | **Estimated Effort**: 3-4 days
+**Complexity**: Medium
 
 Note: Transaction operations (`start_transaction`, `commit_transaction`, `abort_transaction`)
 are implemented in Phase 1 as **session methods** in `driver/src/ffi/session.rs`, not as
@@ -1274,19 +1639,33 @@ The transaction methods work by:
 | `driver/src/ffi/operations/database_mgmt.rs` | 6 | drop_database, list_databases, run_command |
 | `driver/src/ffi/operations/watch.rs` | 7 | Change streams |
 
-### Modified Files
+### Modified Files (FFI Layer)
+| File | Phase | Changes |
+|------|-------|---------|
+| `driver/src/ffi/client.rs` | 1 | Add handle pools (session, read_pref, write_concern, read_concern) |
+| `driver/src/ffi/types.rs` | 1 | Rewrite OperationContext to use handles |
+| `driver/src/ffi/mod.rs` | 1 | Add module exports |
+| `driver/src/ffi/api.rs` | 2+ | Keep existing API, add deprecation comments |
+
+### Modified Files (Driver Core - Phase 0)
 | File | Changes |
 |------|---------|
-| `driver/src/ffi/client.rs` | Add handle pools (session, read_pref, write_concern, read_concern) |
-| `driver/src/ffi/types.rs` | Rewrite OperationContext to use handles |
-| `driver/src/ffi/mod.rs` | Add module exports |
-| `driver/src/ffi/api.rs` | Keep existing API, add deprecation comments |
+| `driver/src/operation/find.rs` | Add `FilterDoc` enum, `new_raw()` constructor |
+| `driver/src/operation/delete.rs` | Add `FilterDoc`, `new_raw()` |
+| `driver/src/operation/update.rs` | Add `FilterDoc`, `with_update_raw()` |
+| `driver/src/operation/aggregate.rs` | Add `Pipeline` enum, `new_raw()` |
+| `driver/src/operation/find_and_modify.rs` | Add `FilterDoc` for query |
+| `driver/src/operation/count_documents.rs` | Add `new_raw()` with raw filter |
+| `driver/src/operation/distinct.rs` | Add `FilterDoc` for filter |
+| `driver/src/operation/mod.rs` | Add `FilterDoc`, `Pipeline`, `DocOrRaw` types |
+| `driver/src/client/options/bulk_write.rs` | Add `DocOrRaw` to WriteModel variants |
+| `driver/src/db/options.rs` | Add `DocOrRaw` for ListCollections filter |
+| `driver/src/index.rs` | Add `DocOrRaw` for IndexModel keys |
 
-### No Driver Core Changes Required
+### Unchanged
 The opaque session design with real `ClientSession` objects means:
 - No changes to `driver/src/client/executor.rs`
 - No changes to `driver/src/client/session.rs`
-- No changes to operation trait or implementations
 
 ---
 
@@ -1342,15 +1721,16 @@ With AI-assisted development, each phase can typically be completed in a single 
 
 | Phase | Description | Dependencies |
 |-------|-------------|--------------|
+| 0 | Raw Document Support in Operations | None |
 | 1 | Handle Pools, Sessions, Concerns, Error/Result Types | None |
-| 2 | Core CRUD Operations | Phase 1 |
-| 3 | Aggregate, Count, Distinct, Cursor | Phase 2 |
+| 2 | Core CRUD Operations | Phase 0, Phase 1 |
+| 3 | Aggregate, Count, Distinct, Cursor | Phase 0, Phase 2 |
 | 4 | Find-and-Modify Operations | Phase 2 |
 | 5 | Bulk Write Operations | Phase 2 |
 | 6 | Index & Collection Management | Phase 2 |
 | 7 | Change Streams | Phase 3 |
 
-Phases 2-6 can be parallelized after Phase 1 is complete.
+Phase 0 and Phase 1 can be done in parallel. Phases 2-6 can be parallelized after both are complete.
 
 ---
 
