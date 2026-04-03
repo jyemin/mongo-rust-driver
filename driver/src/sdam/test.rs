@@ -28,6 +28,59 @@ use crate::{
     Client,
 };
 
+/// Regression test: Client::shutdown() must not deadlock.
+///
+/// The topology worker's shutdown sequence closes monitors and waits for them to exit.
+/// Meanwhile, a monitor in streaming mode may complete a hello and call
+/// topology_updater.update(), which waits for acknowledgment from the topology worker.
+/// Since the worker has already exited its processing loop, neither side makes progress.
+///
+/// The fix is to drop the topology worker's update_receiver before closing monitors,
+/// so that the monitor's update() call fails immediately.
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_does_not_deadlock() {
+    let mut options = get_client_options().await.clone();
+    options.heartbeat_freq = Some(Duration::from_millis(500));
+
+    // Add a command event handler to introduce callback overhead on every command
+    // (including the monitor's streaming hello). This widens the race window between
+    // the monitor's topology_updater.update() and the topology worker's shutdown.
+    use crate::event::EventHandler;
+    use crate::event::command::CommandEvent;
+    options.command_event_handler = Some(EventHandler::callback(|_event: CommandEvent| {
+        // Simulate cross-language callback overhead.
+        std::thread::yield_now();
+    }));
+
+    // Keep a long-lived client alive so the runtime stays alive across iterations.
+    let _fixture_client = Client::with_options(options.clone()).unwrap();
+
+    super::topology::DELAY_SHUTDOWN_FOR_TEST.store(true, std::sync::atomic::Ordering::Relaxed);
+
+    for i in 0..5 {
+        let client = Client::with_options(options.clone()).unwrap();
+
+        let _ = client
+            .database("admin")
+            .run_command(doc! { "ping": 1 })
+            .await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            client.shutdown().immediate(true).await;
+        })
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "shutdown() deadlocked on iteration {}",
+            i
+        );
+    }
+
+    super::topology::DELAY_SHUTDOWN_FOR_TEST.store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn min_heartbeat_frequency() {
     if topology_is_load_balanced().await {

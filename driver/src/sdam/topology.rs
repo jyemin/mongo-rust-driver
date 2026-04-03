@@ -58,6 +58,13 @@ use super::{
     TransactionSupportStatus,
 };
 
+/// Test-only flag: when set, the topology worker sleeps after dropping its update_receiver
+/// during shutdown. This widens the race window so the shutdown_does_not_deadlock test can
+/// deterministically verify the fix.
+#[cfg(test)]
+pub(crate) static DELAY_SHUTDOWN_FOR_TEST: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// A struct providing access to the client's current view of the topology.
 /// When this is dropped, monitors will stop performing checks.
 #[derive(Debug)]
@@ -339,6 +346,23 @@ impl TopologyWorker {
 
             // indicate to the topology watchers that the topology is no longer alive
             drop(self.publisher);
+
+            // In tests, sleep briefly to give any in-flight monitor hello responses a chance
+            // to complete and call topology_updater.update(). This widens the race window
+            // to verify the deadlock fix (dropping update_receiver before closing monitors).
+            // Drop the update receiver so monitors' topology_updater.update() calls fail
+            // immediately instead of waiting for acknowledgment from this (now-exited) loop.
+            // Without this, close_monitor().await deadlocks: we wait for the monitor to exit,
+            // but the monitor waits for us to acknowledge its update.
+            drop(self.update_receiver);
+
+            #[cfg(test)]
+            if DELAY_SHUTDOWN_FOR_TEST.load(std::sync::atomic::Ordering::Relaxed) {
+                // Sleep longer than heartbeat_freq (maxAwaitTimeMS) to ensure the
+                // monitor completes a hello and calls topology_updater.update() during
+                // this window. Without the fix above, this would deadlock.
+                tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+            }
 
             // Close all the monitors.
             let mut close_futures = FuturesUnordered::new();
