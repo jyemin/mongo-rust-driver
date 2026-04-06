@@ -7,16 +7,48 @@ use crate::{
     coll::Collection,
     error::Result,
     ffi::{
-        types::{Bson, ContextExt, OperationContext},
+        types::{Bson, BsonValue, ContextExt, OperationContext},
         utils::{c_char_to_str, c_char_to_string, i64_to_duration_ms},
     },
     ClientSession,
 };
 
+/// Options for `count_documents`.
+///
+/// All pointer fields are nullable (null = not set).
+#[repr(C)]
+pub struct CountOptions {
+    /// Collation as a serialized BSON document. Nullable.
+    pub collation: *const Bson,
+    /// Index hint by name. Nullable. Takes precedence over `hint_keys`.
+    pub hint_name: *const c_char,
+    /// Index hint by key pattern as BSON document. Nullable.
+    pub hint_keys: *const Bson,
+    /// Maximum number of documents to count. -1 = not set.
+    pub limit: i64,
+    /// Number of documents to skip. -1 = not set.
+    pub skip: i64,
+    /// Maximum time in milliseconds. -1 = not set.
+    pub max_time_ms: i64,
+    /// Comment BSON value. Nullable.
+    pub comment: *const BsonValue,
+}
+
+/// Options for `estimated_document_count`.
+///
+/// All pointer fields are nullable (null = not set).
+#[repr(C)]
+pub struct EstimatedDocumentCountOptions {
+    /// Maximum time in milliseconds. -1 = not set.
+    pub max_time_ms: i64,
+    /// Comment BSON value. Nullable.
+    pub comment: *const BsonValue,
+}
+
 // --- Option parsing (moved from ffi/count.rs) ---
 
 pub(crate) unsafe fn parse_count_options(
-    opts: *const crate::ffi::count::CountOptions,
+    opts: *const CountOptions,
     ctx: *const OperationContext,
 ) -> Result<crate::coll::options::CountOptions> {
     let mut options = crate::coll::options::CountOptions::default();
@@ -60,7 +92,7 @@ pub(crate) unsafe fn parse_count_options(
 }
 
 pub(crate) unsafe fn parse_estimated_options(
-    opts: *const crate::ffi::count::EstimatedDocumentCountOptions,
+    opts: *const EstimatedDocumentCountOptions,
     ctx: *const OperationContext,
 ) -> Result<crate::coll::options::EstimatedDocumentCountOptions> {
     let mut options = crate::coll::options::EstimatedDocumentCountOptions::default();
@@ -91,7 +123,7 @@ pub(crate) unsafe fn prepare_count_documents(
     db_name: *const c_char,
     coll_name: *const c_char,
     filter: *const Bson,
-    opts: *const crate::ffi::count::CountOptions,
+    opts: *const CountOptions,
 ) -> Result<(Collection<Document>, Document, crate::coll::options::CountOptions)> {
     use crate::error::Error;
 
@@ -127,7 +159,7 @@ pub(crate) unsafe fn prepare_estimated_document_count(
     ctx: *const OperationContext,
     db_name: *const c_char,
     coll_name: *const c_char,
-    opts: *const crate::ffi::count::EstimatedDocumentCountOptions,
+    opts: *const EstimatedDocumentCountOptions,
 ) -> Result<(Collection<Document>, crate::coll::options::EstimatedDocumentCountOptions)> {
     use crate::error::Error;
 

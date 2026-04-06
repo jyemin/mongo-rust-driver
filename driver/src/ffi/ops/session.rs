@@ -1,9 +1,41 @@
 //! Shared session option parsing logic.
 
+use std::os::raw::c_char;
+
 use crate::ffi::{
     error::{Error, InvalidArgumentError},
     utils::{c_char_to_string, i64_to_duration_ms, parse_read_preference_mode},
 };
+
+/// Session options for FFI.
+#[repr(C)]
+pub struct SessionOptions {
+    /// Causal consistency. -1 = not set (use default), 0 = false, 1 = true
+    pub causal_consistency: i8,
+    /// Snapshot reads. -1 = not set, 0 = false, 1 = true
+    pub snapshot: i8,
+    /// Default transaction options (applied when starting transactions)
+    pub default_transaction_options: *const TransactionOptions,
+}
+
+/// Transaction options for FFI.
+#[repr(C)]
+pub struct TransactionOptions {
+    /// Read concern level (null-terminated string, nullable)
+    pub read_concern_level: *const c_char,
+    /// Write concern w value. -1 = not set, 0+ = w value
+    pub write_concern_w: i32,
+    /// Write concern w tag (for w:"majority", null-terminated, nullable)
+    pub write_concern_w_tag: *const c_char,
+    /// Write concern journal. -1 = not set, 0 = false, 1 = true
+    pub write_concern_j: i8,
+    /// Write concern wtimeout in milliseconds. -1 = not set
+    pub write_concern_w_timeout_ms: i64,
+    /// Read preference mode. 0=primary, 1=primaryPreferred, 2=secondary, etc. 255 = not set
+    pub read_preference_mode: u8,
+    /// Max commit time in milliseconds. -1 = not set
+    pub max_commit_time_ms: i64,
+}
 
 /// Parse FFI transaction options into Rust TransactionOptions.
 ///
@@ -11,7 +43,7 @@ use crate::ffi::{
 ///
 /// `options` must be null or a valid pointer to a `TransactionOptions`.
 pub(crate) unsafe fn parse_transaction_options(
-    options: *const crate::ffi::session::TransactionOptions,
+    options: *const TransactionOptions,
 ) -> Result<Option<crate::options::TransactionOptions>, Error> {
     if options.is_null() {
         return Ok(None);
@@ -78,7 +110,7 @@ pub(crate) unsafe fn parse_transaction_options(
 ///
 /// `options` must be null or a valid pointer to a `SessionOptions`.
 pub(crate) unsafe fn parse_session_options(
-    options: *const crate::ffi::session::SessionOptions,
+    options: *const SessionOptions,
 ) -> Result<Option<crate::options::SessionOptions>, Error> {
     if options.is_null() {
         return Ok(None);

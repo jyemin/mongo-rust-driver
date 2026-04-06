@@ -10,16 +10,73 @@ use crate::{
     },
     error::Result,
     ffi::{
-        types::{Bson, BsonArray, ContextExt, OperationContext, OwnedBsonValue},
+        types::{Bson, BsonArray, BsonValue, ContextExt, OperationContext, OwnedBsonValue},
         utils::{c_char_to_str, c_char_to_string},
     },
     ClientSession,
 };
 
+/// Result of an update_one, update_many, or replace_one operation.
+#[repr(C)]
+pub struct UpdateResult {
+    /// Number of documents that matched the filter.
+    pub matched_count: u64,
+    /// Number of documents that were modified.
+    pub modified_count: u64,
+    /// The `_id` of the upserted document, or null/zero-type if no upsert occurred.
+    pub upserted_id: OwnedBsonValue,
+}
+
+/// Options for update operations.
+///
+/// All pointer fields are nullable (null = not set).
+#[repr(C)]
+pub struct UpdateOneOptions {
+    /// Collation as a serialized BSON document. Nullable.
+    pub collation: *const Bson,
+    /// Index hint by name. Nullable. Takes precedence over `hint_keys`.
+    pub hint_name: *const c_char,
+    /// Index hint by key pattern as BSON document. Nullable.
+    pub hint_keys: *const Bson,
+    /// Variables for MQL expressions (`$let`). Nullable BSON document.
+    pub let_vars: *const Bson,
+    /// Comment BSON value. Nullable.
+    pub comment: *const BsonValue,
+    /// Array filters as BSON array. Nullable.
+    pub array_filters: *const Bson,
+    /// If true, insert a document if no matching document is found. -1 = not set.
+    pub upsert: i8,
+    /// Opt out of document-level validation. -1 = not set.
+    pub bypass_document_validation: i8,
+    /// Sort order to select which document to update when multiple match. Nullable. MongoDB 8.0+.
+    pub sort: *const Bson,
+}
+
+/// Options for replace_one operations.
+#[repr(C)]
+pub struct ReplaceOneOptions {
+    /// Collation as a serialized BSON document. Nullable.
+    pub collation: *const Bson,
+    /// Index hint by name. Nullable. Takes precedence over `hint_keys`.
+    pub hint_name: *const c_char,
+    /// Index hint by key pattern as BSON document. Nullable.
+    pub hint_keys: *const Bson,
+    /// Variables for MQL expressions (`$let`). Nullable BSON document.
+    pub let_vars: *const Bson,
+    /// Comment BSON value. Nullable.
+    pub comment: *const BsonValue,
+    /// If true, insert a document if no matching document is found. -1 = not set.
+    pub upsert: i8,
+    /// Opt out of document-level validation. -1 = not set.
+    pub bypass_document_validation: i8,
+    /// Sort order to select which document to replace when multiple match. Nullable. MongoDB 8.0+.
+    pub sort: *const Bson,
+}
+
 // --- Option parsing (moved from ffi/update.rs) ---
 
 pub(crate) unsafe fn parse_update_options(
-    opts: *const crate::ffi::update::UpdateOneOptions,
+    opts: *const UpdateOneOptions,
     ctx: *const OperationContext,
 ) -> Result<UpdateOptions> {
     use crate::ffi::utils::i8_to_option_bool;
@@ -77,7 +134,7 @@ pub(crate) unsafe fn parse_update_options(
 }
 
 pub(crate) unsafe fn parse_replace_options(
-    opts: *const crate::ffi::update::ReplaceOneOptions,
+    opts: *const ReplaceOneOptions,
     ctx: *const OperationContext,
 ) -> Result<ReplaceOptions> {
     use crate::ffi::utils::i8_to_option_bool;
@@ -120,12 +177,12 @@ pub(crate) unsafe fn parse_replace_options(
 
 pub(crate) fn build_update_result(
     r: crate::results::UpdateResult,
-) -> Result<crate::ffi::update::UpdateResult> {
+) -> Result<UpdateResult> {
     let upserted_id = match r.upserted_id {
         Some(id) => OwnedBsonValue::from_bson(&id)?,
         None => OwnedBsonValue::null(),
     };
-    Ok(crate::ffi::update::UpdateResult {
+    Ok(UpdateResult {
         matched_count: r.matched_count,
         modified_count: r.modified_count,
         upserted_id,
@@ -142,7 +199,7 @@ pub(crate) unsafe fn prepare_update(
     filter: *const Bson,
     update: *const Bson,
     pipeline: &BsonArray,
-    opts: *const crate::ffi::update::UpdateOneOptions,
+    opts: *const UpdateOneOptions,
 ) -> Result<(Collection<Document>, Document, UpdateModifications, UpdateOptions)> {
     use crate::error::Error;
 
@@ -191,7 +248,7 @@ pub(crate) unsafe fn prepare_replace(
     coll_name: *const c_char,
     filter: *const Bson,
     replacement: *const Bson,
-    opts: *const crate::ffi::update::ReplaceOneOptions,
+    opts: *const ReplaceOneOptions,
 ) -> Result<(Collection<Document>, Document, Document, ReplaceOptions)> {
     use crate::error::Error;
 

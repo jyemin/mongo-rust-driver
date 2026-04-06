@@ -7,16 +7,40 @@ use crate::{
     coll::Collection,
     error::Result,
     ffi::{
-        types::{Bson, ContextExt, OperationContext},
+        types::{Bson, BsonValue, ContextExt, OperationContext},
         utils::{c_char_to_str, c_char_to_string},
     },
     ClientSession,
 };
 
+/// Result of a delete_one or delete_many operation.
+#[repr(C)]
+pub struct DeleteResult {
+    pub deleted_count: u64,
+}
+
+/// Options for delete operations.
+///
+/// All pointer fields are nullable (null = not set).
+/// `write_concern` comes from `OperationContext`, not this struct.
+#[repr(C)]
+pub struct DeleteOptions {
+    /// Collation as a serialized BSON document. Nullable.
+    pub collation: *const Bson,
+    /// Index hint by name. Nullable. Takes precedence over `hint_keys`.
+    pub hint_name: *const c_char,
+    /// Index hint by key pattern as BSON document. Nullable.
+    pub hint_keys: *const Bson,
+    /// Variables for MQL expressions (`$let`). Nullable BSON document.
+    pub let_vars: *const Bson,
+    /// Comment BSON value. Nullable.
+    pub comment: *const BsonValue,
+}
+
 // --- Option parsing (moved from ffi/delete.rs) ---
 
 pub(crate) unsafe fn parse_delete_options(
-    opts: *const crate::ffi::delete::DeleteOptions,
+    opts: *const DeleteOptions,
     ctx: *const OperationContext,
 ) -> Result<crate::coll::options::DeleteOptions> {
     let mut options = crate::coll::options::DeleteOptions::default();
@@ -56,7 +80,7 @@ pub(crate) unsafe fn prepare_delete(
     db_name: *const c_char,
     coll_name: *const c_char,
     filter: *const Bson,
-    opts: *const crate::ffi::delete::DeleteOptions,
+    opts: *const DeleteOptions,
 ) -> Result<(Collection<Document>, Document, crate::coll::options::DeleteOptions)> {
     use crate::error::Error;
 

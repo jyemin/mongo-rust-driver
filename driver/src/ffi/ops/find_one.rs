@@ -7,11 +7,88 @@ use crate::{
     coll::Collection,
     error::Result,
     ffi::{
-        types::{Bson, BsonArray, ContextExt, OperationContext},
+        types::{Bson, BsonArray, BsonValue, ContextExt, OperationContext},
         utils::{c_char_to_str, c_char_to_string, i64_to_duration_ms, i8_to_option_bool},
     },
     ClientSession,
 };
+
+/// Options for find_one_and_delete.
+#[repr(C)]
+pub struct FindOneAndDeleteOptions {
+    /// Max query execution time in milliseconds. -1 = not set.
+    pub max_time_ms: i64,
+    /// Projection as a serialized BSON document. Nullable.
+    pub projection: *const Bson,
+    /// Sort order as a serialized BSON document. Nullable.
+    pub sort: *const Bson,
+    /// Collation as a serialized BSON document. Nullable.
+    pub collation: *const Bson,
+    /// Index hint by name. Nullable. Takes precedence over `hint_keys`.
+    pub hint_name: *const c_char,
+    /// Index hint by key pattern as BSON document. Nullable.
+    pub hint_keys: *const Bson,
+    /// Variables for MQL expressions (`$let`). Nullable BSON document.
+    pub let_vars: *const Bson,
+    /// Comment BSON value. Nullable.
+    pub comment: *const BsonValue,
+}
+
+/// Options for find_one_and_replace.
+#[repr(C)]
+pub struct FindOneAndReplaceOptions {
+    /// Tri-state: -1 = not set, 0 = false, 1 = true.
+    pub bypass_document_validation: i8,
+    /// Max query execution time in milliseconds. -1 = not set.
+    pub max_time_ms: i64,
+    /// Projection as a serialized BSON document. Nullable.
+    pub projection: *const Bson,
+    /// Which document to return: -1 = not set, 0 = Before, 1 = After.
+    pub return_document: i8,
+    /// Sort order as a serialized BSON document. Nullable.
+    pub sort: *const Bson,
+    /// Tri-state: -1 = not set, 0 = false, 1 = true.
+    pub upsert: i8,
+    /// Collation as a serialized BSON document. Nullable.
+    pub collation: *const Bson,
+    /// Index hint by name. Nullable. Takes precedence over `hint_keys`.
+    pub hint_name: *const c_char,
+    /// Index hint by key pattern as BSON document. Nullable.
+    pub hint_keys: *const Bson,
+    /// Variables for MQL expressions (`$let`). Nullable BSON document.
+    pub let_vars: *const Bson,
+    /// Comment BSON value. Nullable.
+    pub comment: *const BsonValue,
+}
+
+/// Options for find_one_and_update.
+#[repr(C)]
+pub struct FindOneAndUpdateOptions {
+    /// Array filter documents for array update operators. Empty = not set.
+    pub array_filters: BsonArray,
+    /// Tri-state: -1 = not set, 0 = false, 1 = true.
+    pub bypass_document_validation: i8,
+    /// Max query execution time in milliseconds. -1 = not set.
+    pub max_time_ms: i64,
+    /// Projection as a serialized BSON document. Nullable.
+    pub projection: *const Bson,
+    /// Which document to return: -1 = not set, 0 = Before, 1 = After.
+    pub return_document: i8,
+    /// Sort order as a serialized BSON document. Nullable.
+    pub sort: *const Bson,
+    /// Tri-state: -1 = not set, 0 = false, 1 = true.
+    pub upsert: i8,
+    /// Collation as a serialized BSON document. Nullable.
+    pub collation: *const Bson,
+    /// Index hint by name. Nullable. Takes precedence over `hint_keys`.
+    pub hint_name: *const c_char,
+    /// Index hint by key pattern as BSON document. Nullable.
+    pub hint_keys: *const Bson,
+    /// Variables for MQL expressions (`$let`). Nullable BSON document.
+    pub let_vars: *const Bson,
+    /// Comment BSON value. Nullable.
+    pub comment: *const BsonValue,
+}
 
 // --- Helper functions (moved from ffi/find_one.rs) ---
 
@@ -68,7 +145,7 @@ pub(crate) unsafe fn parse_update_mods(
 }
 
 pub(crate) unsafe fn parse_foad_options(
-    opts: *const crate::ffi::find_one::FindOneAndDeleteOptions,
+    opts: *const FindOneAndDeleteOptions,
     ctx: *const OperationContext,
 ) -> Result<crate::coll::options::FindOneAndDeleteOptions> {
     let mut options = crate::coll::options::FindOneAndDeleteOptions::default();
@@ -94,7 +171,7 @@ pub(crate) unsafe fn parse_foad_options(
 }
 
 pub(crate) unsafe fn parse_foar_options(
-    opts: *const crate::ffi::find_one::FindOneAndReplaceOptions,
+    opts: *const FindOneAndReplaceOptions,
     ctx: *const OperationContext,
 ) -> Result<crate::coll::options::FindOneAndReplaceOptions> {
     let mut options = crate::coll::options::FindOneAndReplaceOptions::default();
@@ -123,7 +200,7 @@ pub(crate) unsafe fn parse_foar_options(
 }
 
 pub(crate) unsafe fn parse_foau_options(
-    opts: *const crate::ffi::find_one::FindOneAndUpdateOptions,
+    opts: *const FindOneAndUpdateOptions,
     ctx: *const OperationContext,
 ) -> Result<crate::coll::options::FindOneAndUpdateOptions> {
     let mut options = crate::coll::options::FindOneAndUpdateOptions::default();
@@ -168,7 +245,7 @@ pub(crate) unsafe fn prepare_find_one_and_delete(
     db_name: *const c_char,
     coll_name: *const c_char,
     filter: *const Bson,
-    opts: *const crate::ffi::find_one::FindOneAndDeleteOptions,
+    opts: *const FindOneAndDeleteOptions,
 ) -> Result<(
     Collection<Document>,
     Document,
@@ -210,7 +287,7 @@ pub(crate) unsafe fn prepare_find_one_and_update(
     filter: *const Bson,
     update_doc: *const Bson,
     update_pipeline: BsonArray,
-    opts: *const crate::ffi::find_one::FindOneAndUpdateOptions,
+    opts: *const FindOneAndUpdateOptions,
 ) -> Result<(
     Collection<Document>,
     Document,
@@ -256,7 +333,7 @@ pub(crate) unsafe fn prepare_find_one_and_replace(
     coll_name: *const c_char,
     filter: *const Bson,
     replacement: *const Bson,
-    opts: *const crate::ffi::find_one::FindOneAndReplaceOptions,
+    opts: *const FindOneAndReplaceOptions,
 ) -> Result<(
     Collection<Document>,
     Document,

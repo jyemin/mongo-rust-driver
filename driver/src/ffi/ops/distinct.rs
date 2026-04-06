@@ -7,16 +7,45 @@ use crate::{
     coll::Collection,
     error::Result,
     ffi::{
-        types::{Bson, ContextExt, OperationContext},
+        types::{Bson, BsonValue, ContextExt, OperationContext, OwnedBsonValue},
         utils::{c_char_to_str, c_char_to_string, i64_to_duration_ms},
     },
     ClientSession,
 };
 
+/// Result for `mongo_distinct`.
+///
+/// On success, `values` points to an array of `len` BSON values.
+/// The memory is owned by the driver and valid only for the duration of the callback.
+#[repr(C)]
+pub struct DistinctResult {
+    /// Pointer to an array of distinct values.
+    pub values: *const OwnedBsonValue,
+    /// Number of values in the array.
+    pub len: usize,
+}
+
+/// Options for `mongo_distinct`.
+///
+/// All pointer fields are nullable (null = not set).
+#[repr(C)]
+pub struct DistinctOptions {
+    /// Collation as a serialized BSON document. Nullable.
+    pub collation: *const Bson,
+    /// Index hint by name. Nullable. Takes precedence over `hint_keys`.
+    pub hint_name: *const c_char,
+    /// Index hint by key pattern as BSON document. Nullable.
+    pub hint_keys: *const Bson,
+    /// Maximum time in milliseconds. -1 = not set.
+    pub max_time_ms: i64,
+    /// Comment BSON value. Nullable.
+    pub comment: *const BsonValue,
+}
+
 // --- Option parsing (moved from ffi/distinct.rs) ---
 
 pub(crate) unsafe fn parse_distinct_options(
-    opts: *const crate::ffi::distinct::DistinctOptions,
+    opts: *const DistinctOptions,
     ctx: *const OperationContext,
 ) -> Result<crate::coll::options::DistinctOptions> {
     let mut options = crate::coll::options::DistinctOptions::default();
@@ -60,7 +89,7 @@ pub(crate) unsafe fn prepare_distinct(
     coll_name: *const c_char,
     field_name: *const c_char,
     filter: *const Bson,
-    opts: *const crate::ffi::distinct::DistinctOptions,
+    opts: *const DistinctOptions,
 ) -> Result<(
     Collection<Document>,
     String,

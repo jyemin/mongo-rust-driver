@@ -5,6 +5,7 @@
 //! callback and future FFI surfaces call these shared functions.
 
 pub(crate) mod aggregate;
+pub(crate) mod client;
 pub(crate) mod command;
 pub(crate) mod count;
 pub(crate) mod delete;

@@ -13,11 +13,59 @@ use crate::{
     options::{CursorType, Hint, SelectionCriteria},
 };
 
+/// FFI-compatible find options.
+///
+/// Use -1 for "not set" on integer options, null for pointer options.
+/// For tri-state booleans (i8): -1 = not set, 0 = false, 1 = true.
+#[repr(C)]
+pub struct FindOptions {
+    /// Allow disk use for sorting large result sets. Tri-state: -1 = not set, 0 = false, 1 = true.
+    pub allow_disk_use: i8,
+    /// Allow partial results from mongos if some shards are down. Tri-state.
+    pub allow_partial_results: i8,
+    /// Number of documents per batch. -1 = not set.
+    pub batch_size: i32,
+    /// Comment to attach to the query. Nullable BSON value wrapped in doc with empty key.
+    pub comment: *const Bson,
+    /// Cursor type: -1 = not set, 0 = NonTailable, 1 = Tailable, 2 = TailableAwait.
+    pub cursor_type: i8,
+    /// Index name hint. Nullable, takes precedence over hint_keys if set.
+    pub hint_name: *const c_char,
+    /// Index keys hint as BSON document. Nullable.
+    pub hint_keys: *const Bson,
+    /// Maximum number of documents to return. 0 = not set.
+    pub limit: i64,
+    /// Exclusive upper bound for a specific index. Nullable BSON document.
+    pub max: *const Bson,
+    /// Max time for tailable cursor to wait for new documents. -1 = not set.
+    pub max_await_time_ms: i64,
+    /// Maximum query execution time in milliseconds. -1 = not set.
+    pub max_time_ms: i64,
+    /// Inclusive lower bound for a specific index. Nullable BSON document.
+    pub min: *const Bson,
+    /// Prevent cursor timeout after inactivity. Tri-state.
+    pub no_cursor_timeout: i8,
+    /// Projection document. Nullable BSON document.
+    pub projection: *const Bson,
+    /// Return only index keys, not full documents. Tri-state.
+    pub return_key: i8,
+    /// Include record identifier in results. Tri-state.
+    pub show_record_id: i8,
+    /// Number of documents to skip. -1 = not set.
+    pub skip: i64,
+    /// Sort specification. Nullable BSON document.
+    pub sort: *const Bson,
+    /// Collation options. Nullable BSON document (deserialized as Collation).
+    pub collation: *const Bson,
+    /// Variables for use in aggregation expressions. Nullable BSON document.
+    pub let_vars: *const Bson,
+}
+
 // --- Option parsing (moved from ffi/find.rs) ---
 
 /// Parse FFI FindOptions into driver FindOptions.
 pub(crate) unsafe fn parse_find_options(
-    opts: *const crate::ffi::find::FindOptions,
+    opts: *const FindOptions,
     ctx: *const OperationContext,
 ) -> Result<crate::options::FindOptions> {
     let mut options = crate::options::FindOptions::default();
@@ -102,7 +150,7 @@ pub(crate) unsafe fn prepare_find(
     db_name: *const c_char,
     coll_name: *const c_char,
     filter: *const Bson,
-    opts: *const crate::ffi::find::FindOptions,
+    opts: *const FindOptions,
 ) -> Result<(Collection<Document>, Document, crate::options::FindOptions)> {
     use crate::error::Error;
 

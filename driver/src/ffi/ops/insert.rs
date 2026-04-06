@@ -7,11 +7,34 @@ use crate::{
     coll::{options::InsertOneOptions, Collection},
     error::Result,
     ffi::{
-        types::{BsonArray, BsonValue, ContextExt, OperationContext},
+        types::{BsonArray, BsonValue, ContextExt, OperationContext, OwnedBsonValue},
         utils::c_char_to_str,
     },
     ClientSession,
 };
+
+/// Result of an insert_one operation.
+#[repr(C)]
+pub struct InsertOneResult {
+    /// The `_id` of the inserted document. Any BSON type (ObjectId, String, Int, etc.)
+    pub inserted_id: OwnedBsonValue,
+}
+
+/// Result of an insert_many operation.
+#[repr(C)]
+pub struct InsertManyResult {
+    /// The ids of the inserted documents.
+    pub inserted_ids: *const InsertedId,
+    /// The length of the inserted_ids array.
+    pub inserted_ids_len: usize,
+}
+
+/// A single inserted ID as part of a batch.
+#[repr(C)]
+pub struct InsertedId {
+    pub index: usize,
+    pub id: OwnedBsonValue,
+}
 
 // --- Prepare functions ---
 

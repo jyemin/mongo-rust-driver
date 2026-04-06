@@ -8,11 +8,37 @@ use crate::{
     db::Database,
     error::Result,
     ffi::{
-        types::{Bson, BsonArray, ContextExt, OperationContext},
+        types::{Bson, BsonArray, BsonValue, ContextExt, OperationContext},
         utils::{c_char_to_str, c_char_to_string, i64_to_duration_ms, i8_to_option_bool},
     },
     options::{Hint, SelectionCriteria},
 };
+
+/// FFI-compatible aggregate options.
+///
+/// Use -1 for "not set" on integer options, null for pointer options.
+/// For tri-state booleans (i8): -1 = not set, 0 = false, 1 = true.
+#[repr(C)]
+pub struct AggregateOptions {
+    /// Allow disk use for sorting large result sets. Tri-state: -1 = not set, 0 = false, 1 = true.
+    pub allow_disk_use: i8,
+    /// Number of documents per batch. -1 = not set.
+    pub batch_size: i32,
+    /// Opt out of document-level validation. Tri-state.
+    pub bypass_document_validation: i8,
+    /// Collation options. Nullable BSON document.
+    pub collation: *const Bson,
+    /// Comment as a BSON value. Nullable.
+    pub comment: *const BsonValue,
+    /// Index name hint. Nullable, takes precedence over hint_keys if set.
+    pub hint_name: *const c_char,
+    /// Index keys hint as BSON document. Nullable.
+    pub hint_keys: *const Bson,
+    /// Maximum query execution time in milliseconds. -1 = not set.
+    pub max_time_ms: i64,
+    /// Variables for use in aggregation expressions. Nullable BSON document.
+    pub let_vars: *const Bson,
+}
 
 // --- Helper functions (moved from ffi/aggregate.rs) ---
 
@@ -39,7 +65,7 @@ pub(crate) unsafe fn pipeline_from_array(
 
 /// Parse FFI AggregateOptions into driver AggregateOptions.
 pub(crate) unsafe fn parse_aggregate_options(
-    opts: *const crate::ffi::aggregate::AggregateOptions,
+    opts: *const AggregateOptions,
     ctx: *const OperationContext,
 ) -> Result<crate::coll::options::AggregateOptions> {
     let mut options = crate::coll::options::AggregateOptions::default();
@@ -96,7 +122,7 @@ pub(crate) unsafe fn prepare_aggregate_collection(
     db_name: *const c_char,
     coll_name: *const c_char,
     pipeline: BsonArray,
-    opts: *const crate::ffi::aggregate::AggregateOptions,
+    opts: *const AggregateOptions,
 ) -> Result<(
     Collection<Document>,
     Vec<Document>,
@@ -123,7 +149,7 @@ pub(crate) unsafe fn prepare_aggregate_database(
     ctx: *const OperationContext,
     db_name: *const c_char,
     pipeline: BsonArray,
-    opts: *const crate::ffi::aggregate::AggregateOptions,
+    opts: *const AggregateOptions,
 ) -> Result<(Database, Vec<Document>, crate::coll::options::AggregateOptions)> {
     use crate::error::Error;
 
