@@ -28,4 +28,5 @@ mod runtime;
 pub mod update;
 pub mod session;
 pub mod types;
-mod utils;
+pub(crate) mod utils;
+pub(crate) mod ops;

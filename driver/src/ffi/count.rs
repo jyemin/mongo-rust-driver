@@ -9,7 +9,6 @@ use crate::ffi::{
     client::MongoClient,
     error::Error,
     types::{Bson, BsonValue, ContextExt, OperationContext},
-    utils::{c_char_to_str, c_char_to_string, i64_to_duration_ms},
 };
 
 /// Callback for count results.
@@ -49,74 +48,6 @@ pub struct EstimatedDocumentCountOptions {
     pub comment: *const BsonValue,
 }
 
-unsafe fn parse_count_options(
-    opts: *const CountOptions,
-    ctx: *const OperationContext,
-) -> crate::error::Result<crate::coll::options::CountOptions> {
-    let mut options = crate::coll::options::CountOptions::default();
-    options.read_concern = ctx.read_concern();
-    options.selection_criteria = ctx
-        .read_preference()
-        .map(crate::options::SelectionCriteria::ReadPreference);
-
-    if opts.is_null() {
-        return Ok(options);
-    }
-    let opts = &*opts;
-
-    options.hint = if let Some(name) = c_char_to_string(opts.hint_name)? {
-        Some(crate::options::Hint::Name(name))
-    } else if let Some(keys) = Bson::to_doc(opts.hint_keys)? {
-        Some(crate::options::Hint::Keys(keys))
-    } else {
-        None
-    };
-
-    if let Some(doc) = Bson::to_doc(opts.collation)? {
-        options.collation = Some(crate::bson_compat::deserialize_from_document(doc)?);
-    }
-
-    if opts.limit >= 0 {
-        options.limit = Some(opts.limit as u64);
-    }
-
-    if opts.skip >= 0 {
-        options.skip = Some(opts.skip as u64);
-    }
-
-    options.max_time = i64_to_duration_ms(opts.max_time_ms);
-
-    if !opts.comment.is_null() {
-        options.comment = (&*opts.comment).to_bson()?;
-    }
-
-    Ok(options)
-}
-
-unsafe fn parse_estimated_options(
-    opts: *const EstimatedDocumentCountOptions,
-    ctx: *const OperationContext,
-) -> crate::error::Result<crate::coll::options::EstimatedDocumentCountOptions> {
-    let mut options = crate::coll::options::EstimatedDocumentCountOptions::default();
-    options.read_concern = ctx.read_concern();
-    options.selection_criteria = ctx
-        .read_preference()
-        .map(crate::options::SelectionCriteria::ReadPreference);
-
-    if opts.is_null() {
-        return Ok(options);
-    }
-    let opts = &*opts;
-
-    options.max_time = i64_to_duration_ms(opts.max_time_ms);
-
-    if !opts.comment.is_null() {
-        options.comment = (&*opts.comment).to_bson()?;
-    }
-
-    Ok(options)
-}
-
 /// Count documents matching `filter` in the specified collection.
 ///
 /// If `filter` is null, all documents are counted (equivalent to `{}`).
@@ -139,26 +70,15 @@ pub unsafe extern "C" fn mongo_count_documents(
     callback: CountCallback,
     userdata: *mut c_void,
 ) {
+    use crate::ffi::ops::count::{execute_count_documents, prepare_count_documents};
+
     let setup = (|| -> crate::error::Result<_> {
-        use crate::error::Error;
         if client.is_null() {
-            return Err(Error::invalid_argument("client cannot be null"));
+            return Err(crate::error::Error::invalid_argument(
+                "client cannot be null",
+            ));
         }
-        let db = c_char_to_str(db_name)?
-            .ok_or_else(|| Error::invalid_argument("db_name cannot be null"))?;
-        let coll_name_str = c_char_to_str(coll_name)?
-            .ok_or_else(|| Error::invalid_argument("coll_name cannot be null"))?;
-        let coll = (*client)
-            .client
-            .database(db)
-            .collection::<crate::bson::Document>(coll_name_str);
-        let filter_doc: crate::bson::Document = if filter.is_null() {
-            crate::bson::doc! {}
-        } else {
-            (&*filter).as_raw_doc()?.try_into()?
-        };
-        let options = parse_count_options(opts, ctx)?;
-        Ok((coll, filter_doc, options))
+        prepare_count_documents(&(*client).client, ctx, db_name, coll_name, filter, opts)
     })();
 
     let (coll, filter_doc, options) = match setup {
@@ -173,12 +93,7 @@ pub unsafe extern "C" fn mongo_count_documents(
     let userdata_ptr = userdata as usize;
     let client_ref = &*client;
     client_ref.runtime.spawn(async move {
-        let mut action = coll.count_documents(filter_doc).with_options(options);
-        if let Some(session) = session_ref {
-            action = action.session(session);
-        }
-        let result = action.await;
-
+        let result = execute_count_documents(coll, filter_doc, options, session_ref).await;
         let userdata = userdata_ptr as *mut c_void;
         match result {
             Ok(count) => callback(userdata, count, std::ptr::null()),
@@ -207,21 +122,15 @@ pub unsafe extern "C" fn mongo_estimated_document_count(
     callback: CountCallback,
     userdata: *mut c_void,
 ) {
+    use crate::ffi::ops::count::{execute_estimated_document_count, prepare_estimated_document_count};
+
     let setup = (|| -> crate::error::Result<_> {
-        use crate::error::Error;
         if client.is_null() {
-            return Err(Error::invalid_argument("client cannot be null"));
+            return Err(crate::error::Error::invalid_argument(
+                "client cannot be null",
+            ));
         }
-        let db = c_char_to_str(db_name)?
-            .ok_or_else(|| Error::invalid_argument("db_name cannot be null"))?;
-        let coll_name_str = c_char_to_str(coll_name)?
-            .ok_or_else(|| Error::invalid_argument("coll_name cannot be null"))?;
-        let coll = (*client)
-            .client
-            .database(db)
-            .collection::<crate::bson::Document>(coll_name_str);
-        let options = parse_estimated_options(opts, ctx)?;
-        Ok((coll, options))
+        prepare_estimated_document_count(&(*client).client, ctx, db_name, coll_name, opts)
     })();
 
     let (coll, options) = match setup {
@@ -235,11 +144,7 @@ pub unsafe extern "C" fn mongo_estimated_document_count(
     let userdata_ptr = userdata as usize;
     let client_ref = &*client;
     client_ref.runtime.spawn(async move {
-        let result = coll
-            .estimated_document_count()
-            .with_options(options)
-            .await;
-
+        let result = execute_estimated_document_count(coll, options).await;
         let userdata = userdata_ptr as *mut c_void;
         match result {
             Ok(count) => callback(userdata, count, std::ptr::null()),

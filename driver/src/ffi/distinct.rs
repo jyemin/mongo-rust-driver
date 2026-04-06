@@ -9,7 +9,6 @@ use crate::ffi::{
     client::MongoClient,
     error::Error,
     types::{Bson, BsonValue, ContextExt, OwnedBsonValue, OperationContext},
-    utils::{c_char_to_str, c_char_to_string, i64_to_duration_ms},
 };
 
 /// Result for `mongo_distinct`.
@@ -47,42 +46,6 @@ pub struct DistinctOptions {
     pub comment: *const BsonValue,
 }
 
-unsafe fn parse_distinct_options(
-    opts: *const DistinctOptions,
-    ctx: *const OperationContext,
-) -> crate::error::Result<crate::coll::options::DistinctOptions> {
-    let mut options = crate::coll::options::DistinctOptions::default();
-    options.read_concern = ctx.read_concern();
-    options.selection_criteria = ctx
-        .read_preference()
-        .map(crate::options::SelectionCriteria::ReadPreference);
-
-    if opts.is_null() {
-        return Ok(options);
-    }
-    let opts = &*opts;
-
-    options.hint = if let Some(name) = c_char_to_string(opts.hint_name)? {
-        Some(crate::options::Hint::Name(name))
-    } else if let Some(keys) = Bson::to_doc(opts.hint_keys)? {
-        Some(crate::options::Hint::Keys(keys))
-    } else {
-        None
-    };
-
-    if let Some(doc) = Bson::to_doc(opts.collation)? {
-        options.collation = Some(crate::bson_compat::deserialize_from_document(doc)?);
-    }
-
-    options.max_time = i64_to_duration_ms(opts.max_time_ms);
-
-    if !opts.comment.is_null() {
-        options.comment = (&*opts.comment).to_bson()?;
-    }
-
-    Ok(options)
-}
-
 /// Find the distinct values for a specified field across a collection.
 ///
 /// If `filter` is null, all documents are considered (equivalent to `{}`).
@@ -106,28 +69,15 @@ pub unsafe extern "C" fn mongo_distinct(
     callback: DistinctCallback,
     userdata: *mut c_void,
 ) {
+    use crate::ffi::ops::distinct::{execute_distinct, prepare_distinct};
+
     let setup = (|| -> crate::error::Result<_> {
-        use crate::error::Error;
         if client.is_null() {
-            return Err(Error::invalid_argument("client cannot be null"));
+            return Err(crate::error::Error::invalid_argument(
+                "client cannot be null",
+            ));
         }
-        let db = c_char_to_str(db_name)?
-            .ok_or_else(|| Error::invalid_argument("db_name cannot be null"))?;
-        let coll_name_str = c_char_to_str(coll_name)?
-            .ok_or_else(|| Error::invalid_argument("coll_name cannot be null"))?;
-        let field = c_char_to_str(field_name)?
-            .ok_or_else(|| Error::invalid_argument("field_name cannot be null"))?;
-        let coll = (*client)
-            .client
-            .database(db)
-            .collection::<crate::bson::Document>(coll_name_str);
-        let filter_doc: crate::bson::Document = if filter.is_null() {
-            crate::bson::doc! {}
-        } else {
-            (&*filter).as_raw_doc()?.try_into()?
-        };
-        let options = parse_distinct_options(opts, ctx)?;
-        Ok((coll, field.to_string(), filter_doc, options))
+        prepare_distinct(&(*client).client, ctx, db_name, coll_name, field_name, filter, opts)
     })();
 
     let (coll, field, filter_doc, options) = match setup {
@@ -142,11 +92,7 @@ pub unsafe extern "C" fn mongo_distinct(
     let userdata_ptr = userdata as usize;
     let client_ref = &*client;
     client_ref.runtime.spawn(async move {
-        let mut action = coll.distinct(field, filter_doc).with_options(options);
-        if let Some(session) = session_ref {
-            action = action.session(session);
-        }
-        let result = action.await;
+        let result = execute_distinct(coll, field, filter_doc, options, session_ref).await;
 
         let userdata = userdata_ptr as *mut c_void;
         match result {

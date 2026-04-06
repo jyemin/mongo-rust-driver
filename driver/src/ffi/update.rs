@@ -4,15 +4,11 @@ mod tests;
 
 use std::ffi::{c_char, c_void};
 
-use crate::{
-    bson::Document,
-    coll::options::{ReplaceOptions, UpdateModifications, UpdateOptions},
-    ffi::{
-        client::MongoClient,
-        error::Error,
-        types::{Bson, BsonArray, BsonValue, ContextExt, OperationContext, OwnedBsonValue},
-        utils::{c_char_to_str, c_char_to_string, with_err_callback},
-    },
+use crate::ffi::{
+    client::MongoClient,
+    error::Error,
+    types::{Bson, BsonArray, BsonValue, ContextExt, OperationContext, OwnedBsonValue},
+    utils::with_err_callback,
 };
 
 /// Callback for update/replace operation results.
@@ -79,116 +75,6 @@ pub struct ReplaceOneOptions {
     pub sort: *const Bson,
 }
 
-unsafe fn parse_update_options(
-    opts: *const UpdateOneOptions,
-    ctx: *const OperationContext,
-) -> crate::error::Result<UpdateOptions> {
-    use crate::ffi::utils::i8_to_option_bool;
-
-    let mut options = UpdateOptions::default();
-    options.write_concern = ctx.write_concern();
-
-    if opts.is_null() {
-        return Ok(options);
-    }
-    let opts = &*opts;
-
-    options.upsert = i8_to_option_bool(opts.upsert);
-    options.bypass_document_validation = i8_to_option_bool(opts.bypass_document_validation);
-
-    options.hint = if let Some(name) = c_char_to_string(opts.hint_name)? {
-        Some(crate::options::Hint::Name(name))
-    } else if let Some(keys) = Bson::to_doc(opts.hint_keys)? {
-        Some(crate::options::Hint::Keys(keys))
-    } else {
-        None
-    };
-
-    if let Some(doc) = Bson::to_doc(opts.collation)? {
-        options.collation = Some(crate::bson_compat::deserialize_from_document(doc)?);
-    }
-
-    options.let_vars = Bson::to_doc(opts.let_vars)?;
-
-    if !opts.comment.is_null() {
-        options.comment = (&*opts.comment).to_bson()?;
-    }
-
-    options.sort = Bson::to_doc(opts.sort)?;
-
-    if let Some(af_doc) = Bson::to_doc(opts.array_filters)? {
-        // array_filters is passed as a BSON document wrapping an array: {"": [...]}
-        // Extract the array from the first field
-        let mut filters = vec![];
-        for (_, val) in &af_doc {
-            if let crate::bson::Bson::Array(arr) = val {
-                for item in arr {
-                    if let crate::bson::Bson::Document(d) = item {
-                        filters.push(d.clone());
-                    }
-                }
-            }
-        }
-        if !filters.is_empty() {
-            options.array_filters = Some(filters);
-        }
-    }
-
-    Ok(options)
-}
-
-unsafe fn parse_replace_options(
-    opts: *const ReplaceOneOptions,
-    ctx: *const OperationContext,
-) -> crate::error::Result<ReplaceOptions> {
-    use crate::ffi::utils::i8_to_option_bool;
-
-    let mut options = ReplaceOptions::default();
-    options.write_concern = ctx.write_concern();
-
-    if opts.is_null() {
-        return Ok(options);
-    }
-    let opts = &*opts;
-
-    options.upsert = i8_to_option_bool(opts.upsert);
-    options.bypass_document_validation = i8_to_option_bool(opts.bypass_document_validation);
-
-    options.hint = if let Some(name) = c_char_to_string(opts.hint_name)? {
-        Some(crate::options::Hint::Name(name))
-    } else if let Some(keys) = Bson::to_doc(opts.hint_keys)? {
-        Some(crate::options::Hint::Keys(keys))
-    } else {
-        None
-    };
-
-    if let Some(doc) = Bson::to_doc(opts.collation)? {
-        options.collation = Some(crate::bson_compat::deserialize_from_document(doc)?);
-    }
-
-    options.let_vars = Bson::to_doc(opts.let_vars)?;
-
-    if !opts.comment.is_null() {
-        options.comment = (&*opts.comment).to_bson()?;
-    }
-
-    options.sort = Bson::to_doc(opts.sort)?;
-
-    Ok(options)
-}
-
-fn build_update_result(r: crate::results::UpdateResult) -> crate::error::Result<UpdateResult> {
-    let upserted_id = match r.upserted_id {
-        Some(id) => OwnedBsonValue::from_bson(&id)?,
-        None => OwnedBsonValue::null(),
-    };
-    Ok(UpdateResult {
-        matched_count: r.matched_count,
-        modified_count: r.modified_count,
-        upserted_id,
-    })
-}
-
 /// Update up to one document matching `filter`.
 ///
 /// Exactly one of `update` (BSON document) or `pipeline` (non-empty array) must be provided.
@@ -219,58 +105,34 @@ pub unsafe extern "C" fn mongo_update_one(
         if client.is_null() {
             return Err(Error::invalid_argument("client cannot be null"));
         }
-        if filter.is_null() {
-            return Err(Error::invalid_argument("filter cannot be null"));
-        }
-        let update_set = !update.is_null();
-        let pipeline_set = !pipeline.is_empty();
-        if update_set && pipeline_set {
-            return Err(Error::invalid_argument(
-                "only one of update document or pipeline may be provided",
-            ));
-        }
-        if !update_set && !pipeline_set {
-            return Err(Error::invalid_argument(
-                "one of update document or pipeline must be provided",
-            ));
-        }
-        let db = c_char_to_str(db_name)?
-            .ok_or_else(|| Error::invalid_argument("db_name cannot be null"))?;
-        let coll_name_str = c_char_to_str(coll_name)?
-            .ok_or_else(|| Error::invalid_argument("coll_name cannot be null"))?;
-        let coll = (*client)
-            .client
-            .database(db)
-            .collection::<Document>(coll_name_str);
-        let filter_doc: Document = (&*filter).as_raw_doc()?.try_into()?;
-        let modifications = if update_set {
-            let update_doc: Document = (&*update).as_raw_doc()?.try_into()?;
-            UpdateModifications::Document(update_doc)
-        } else {
-            let raw_docs = pipeline.to_raw_docs();
-            let mut docs = vec![];
-            for raw in raw_docs {
-                docs.push(Document::try_from(raw)?);
-            }
-            UpdateModifications::Pipeline(docs)
-        };
-        let options = parse_update_options(opts, ctx)?;
-        Ok((coll, filter_doc, modifications, options))
+        super::ops::update::prepare_update(
+            &(*client).client,
+            ctx,
+            db_name,
+            coll_name,
+            filter,
+            update,
+            &pipeline,
+            opts,
+        )
     });
 
     let session_ref = ctx.session();
     let userdata_ptr = userdata as usize;
     let client_ref = &*client;
     client_ref.runtime.spawn(async move {
-        let mut action = coll.update_one(filter_doc, modifications).with_options(options);
-        if let Some(session) = session_ref {
-            action = action.session(session);
-        }
-        let result = action.await;
+        let result = super::ops::update::execute_update_one(
+            coll,
+            filter_doc,
+            modifications,
+            options,
+            session_ref,
+        )
+        .await;
 
         let userdata = userdata_ptr as *mut c_void;
         with_err_callback!(callback, userdata, || {
-            let out = build_update_result(result?)?;
+            let out = super::ops::update::build_update_result(result?)?;
             callback(userdata, &out, std::ptr::null());
             Ok(())
         });
@@ -302,58 +164,34 @@ pub unsafe extern "C" fn mongo_update_many(
         if client.is_null() {
             return Err(Error::invalid_argument("client cannot be null"));
         }
-        if filter.is_null() {
-            return Err(Error::invalid_argument("filter cannot be null"));
-        }
-        let update_set = !update.is_null();
-        let pipeline_set = !pipeline.is_empty();
-        if update_set && pipeline_set {
-            return Err(Error::invalid_argument(
-                "only one of update document or pipeline may be provided",
-            ));
-        }
-        if !update_set && !pipeline_set {
-            return Err(Error::invalid_argument(
-                "one of update document or pipeline must be provided",
-            ));
-        }
-        let db = c_char_to_str(db_name)?
-            .ok_or_else(|| Error::invalid_argument("db_name cannot be null"))?;
-        let coll_name_str = c_char_to_str(coll_name)?
-            .ok_or_else(|| Error::invalid_argument("coll_name cannot be null"))?;
-        let coll = (*client)
-            .client
-            .database(db)
-            .collection::<Document>(coll_name_str);
-        let filter_doc: Document = (&*filter).as_raw_doc()?.try_into()?;
-        let modifications = if update_set {
-            let update_doc: Document = (&*update).as_raw_doc()?.try_into()?;
-            UpdateModifications::Document(update_doc)
-        } else {
-            let raw_docs = pipeline.to_raw_docs();
-            let mut docs = vec![];
-            for raw in raw_docs {
-                docs.push(Document::try_from(raw)?);
-            }
-            UpdateModifications::Pipeline(docs)
-        };
-        let options = parse_update_options(opts, ctx)?;
-        Ok((coll, filter_doc, modifications, options))
+        super::ops::update::prepare_update(
+            &(*client).client,
+            ctx,
+            db_name,
+            coll_name,
+            filter,
+            update,
+            &pipeline,
+            opts,
+        )
     });
 
     let session_ref = ctx.session();
     let userdata_ptr = userdata as usize;
     let client_ref = &*client;
     client_ref.runtime.spawn(async move {
-        let mut action = coll.update_many(filter_doc, modifications).with_options(options);
-        if let Some(session) = session_ref {
-            action = action.session(session);
-        }
-        let result = action.await;
+        let result = super::ops::update::execute_update_many(
+            coll,
+            filter_doc,
+            modifications,
+            options,
+            session_ref,
+        )
+        .await;
 
         let userdata = userdata_ptr as *mut c_void;
         with_err_callback!(callback, userdata, || {
-            let out = build_update_result(result?)?;
+            let out = super::ops::update::build_update_result(result?)?;
             callback(userdata, &out, std::ptr::null());
             Ok(())
         });
@@ -388,41 +226,33 @@ pub unsafe extern "C" fn mongo_replace_one(
             if client.is_null() {
                 return Err(Error::invalid_argument("client cannot be null"));
             }
-            if filter.is_null() {
-                return Err(Error::invalid_argument("filter cannot be null"));
-            }
-            if replacement.is_null() {
-                return Err(Error::invalid_argument("replacement cannot be null"));
-            }
-            let db = c_char_to_str(db_name)?
-                .ok_or_else(|| Error::invalid_argument("db_name cannot be null"))?;
-            let coll_name_str = c_char_to_str(coll_name)?
-                .ok_or_else(|| Error::invalid_argument("coll_name cannot be null"))?;
-            let coll = (*client)
-                .client
-                .database(db)
-                .collection::<Document>(coll_name_str);
-            let filter_doc: Document = (&*filter).as_raw_doc()?.try_into()?;
-            let replacement_doc: Document = (&*replacement).as_raw_doc()?.try_into()?;
-            let options = parse_replace_options(opts, ctx)?;
-            Ok((coll, filter_doc, replacement_doc, options))
+            super::ops::update::prepare_replace(
+                &(*client).client,
+                ctx,
+                db_name,
+                coll_name,
+                filter,
+                replacement,
+                opts,
+            )
         });
 
     let session_ref = ctx.session();
     let userdata_ptr = userdata as usize;
     let client_ref = &*client;
     client_ref.runtime.spawn(async move {
-        let mut action = coll
-            .replace_one(filter_doc, replacement_doc)
-            .with_options(options);
-        if let Some(session) = session_ref {
-            action = action.session(session);
-        }
-        let result = action.await;
+        let result = super::ops::update::execute_replace_one(
+            coll,
+            filter_doc,
+            replacement_doc,
+            options,
+            session_ref,
+        )
+        .await;
 
         let userdata = userdata_ptr as *mut c_void;
         with_err_callback!(callback, userdata, || {
-            let out = build_update_result(result?)?;
+            let out = super::ops::update::build_update_result(result?)?;
             callback(userdata, &out, std::ptr::null());
             Ok(())
         });

@@ -7,20 +7,15 @@ mod tests;
 
 use std::ffi::{c_char, c_void};
 
-use crate::{
-    bson::Document,
-    coll::options::InsertOneOptions,
-    ffi::{
-        types::{BsonArray, ContextExt},
-        utils::with_err_callback,
-    },
+use crate::ffi::{
+    types::{BsonArray, ContextExt},
+    utils::with_err_callback,
 };
 
 use super::{
     client::MongoClient,
     error::Error,
     types::{Bson, BsonValue, OperationContext, OwnedBsonValue},
-    utils::c_char_to_str,
 };
 
 /// Callback type for insert_one results.
@@ -69,49 +64,26 @@ pub unsafe extern "C" fn mongo_insert_one(
 ) {
     let (coll, raw_doc, options) = with_err_callback!(callback, userdata, || {
         use crate::error::Error;
-
-        // Validate required arguments
         if client.is_null() {
             return Err(Error::invalid_argument("client cannot be null"));
         }
-        if document.is_null() {
-            return Err(Error::invalid_argument("document cannot be null"));
-        }
-
-        let db_name_str = c_char_to_str(db_name)?
-            .ok_or_else(|| Error::invalid_argument("db_name cannot be null"))?;
-        let coll_name_str = c_char_to_str(coll_name)?
-            .ok_or_else(|| Error::invalid_argument("coll_name cannot be null"))?;
-        let client_ref = &*client;
-        let coll = client_ref
-            .client
-            .database(db_name_str)
-            .collection::<Document>(coll_name_str);
-
-        let doc_bson = &*document;
-        let raw_doc = doc_bson.as_raw_doc()?;
-
-        // Build InsertOneOptions
-        let mut options = InsertOneOptions::default();
-        if bypass_document_validation >= 0 {
-            options.bypass_document_validation = Some(bypass_document_validation != 0);
-        }
-        if !comment.is_null() {
-            let comment_val = &*comment;
-            options.comment = comment_val.to_bson()?;
-        }
-        options.write_concern = ctx.write_concern();
-
-        Ok((coll, raw_doc, options))
+        super::ops::insert::prepare_insert_one(
+            &(*client).client,
+            ctx,
+            db_name,
+            coll_name,
+            document,
+            bypass_document_validation,
+            comment,
+        )
     });
 
     let session_ref = ctx.session();
     let userdata_ptr = userdata as usize;
     let client_ref = &*client;
     client_ref.runtime.spawn(async move {
-        let result = coll
-            .insert_one_raw(raw_doc, Some(options), session_ref)
-            .await;
+        let result =
+            super::ops::insert::execute_insert_one(coll, raw_doc, options, session_ref).await;
 
         let userdata = userdata_ptr as *mut c_void;
         with_err_callback!(callback, userdata, || {
@@ -167,48 +139,27 @@ pub unsafe extern "C" fn mongo_insert_many(
 ) {
     let (coll, options) = with_err_callback!(callback, userdata, || {
         use crate::error::Error;
-
-        // Validate required arguments
         if client.is_null() {
             return Err(Error::invalid_argument("client cannot be null"));
         }
-        if documents.is_empty() {
-            return Err(Error::invalid_argument("documents cannot be empty"));
-        }
-
-        let db_name_str = c_char_to_str(db_name)?
-            .ok_or_else(|| Error::invalid_argument("db_name cannot be null"))?;
-        let coll_name_str = c_char_to_str(coll_name)?
-            .ok_or_else(|| Error::invalid_argument("coll_name cannot be null"))?;
-        let client_ref = &*client;
-        let coll = client_ref
-            .client
-            .database(db_name_str)
-            .collection::<Document>(coll_name_str);
-
-        // Build options
-        let mut options = crate::options::InsertManyOptions::default();
-        if bypass_document_validation >= 0 {
-            options.bypass_document_validation = Some(bypass_document_validation != 0);
-        }
-        options.ordered = Some(ordered);
-        if !comment.is_null() {
-            let comment_val = &*comment;
-            options.comment = comment_val.to_bson()?;
-        }
-        options.write_concern = ctx.write_concern();
-
-        Ok((coll, options))
+        super::ops::insert::prepare_insert_many(
+            &(*client).client,
+            ctx,
+            db_name,
+            coll_name,
+            &documents,
+            bypass_document_validation,
+            ordered,
+            comment,
+        )
     });
 
     let session_ref = ctx.session();
     let userdata_ptr = userdata as usize;
     let client_ref = &*client;
     client_ref.runtime.spawn(async move {
-        let raw_docs = documents.to_raw_docs();
-        let result = coll
-            .insert_many_raw(&raw_docs, Some(options), session_ref)
-            .await;
+        let result =
+            super::ops::insert::execute_insert_many(coll, documents, options, session_ref).await;
 
         let userdata = userdata_ptr as *mut c_void;
         let (_inserted_arr, result) = with_err_callback!(callback, userdata, || {

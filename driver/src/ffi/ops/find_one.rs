@@ -1,0 +1,304 @@
+//! Shared find-and-modify operation logic.
+
+use std::ffi::c_char;
+
+use crate::{
+    bson::Document,
+    coll::Collection,
+    error::Result,
+    ffi::{
+        types::{Bson, BsonArray, ContextExt, OperationContext},
+        utils::{c_char_to_str, c_char_to_string, i64_to_duration_ms, i8_to_option_bool},
+    },
+    ClientSession,
+};
+
+// --- Helper functions (moved from ffi/find_one.rs) ---
+
+pub(crate) unsafe fn parse_return_document(
+    value: i8,
+) -> Option<crate::coll::options::ReturnDocument> {
+    match value {
+        0 => Some(crate::coll::options::ReturnDocument::Before),
+        1 => Some(crate::coll::options::ReturnDocument::After),
+        _ => None,
+    }
+}
+
+pub(crate) unsafe fn parse_hint(
+    hint_name: *const c_char,
+    hint_keys: *const Bson,
+) -> Result<Option<crate::options::Hint>> {
+    if let Some(name) = c_char_to_string(hint_name)? {
+        return Ok(Some(crate::options::Hint::Name(name)));
+    }
+    if let Some(keys) = Bson::to_doc(hint_keys)? {
+        return Ok(Some(crate::options::Hint::Keys(keys)));
+    }
+    Ok(None)
+}
+
+pub(crate) unsafe fn parse_update_mods(
+    update_doc: *const Bson,
+    update_pipeline: BsonArray,
+) -> Result<crate::coll::options::UpdateModifications> {
+    use crate::error::Error;
+    match (!update_doc.is_null(), !update_pipeline.is_empty()) {
+        (false, false) => Err(Error::invalid_argument(
+            "one of update_doc or update_pipeline must be provided",
+        )),
+        (true, true) => Err(Error::invalid_argument(
+            "only one of update_doc or update_pipeline may be provided",
+        )),
+        (true, false) => {
+            let doc: Document = (&*update_doc).as_raw_doc()?.try_into()?;
+            Ok(crate::coll::options::UpdateModifications::Document(doc))
+        }
+        (false, true) => {
+            let pipeline = update_pipeline
+                .to_raw_docs()
+                .iter()
+                .map(|raw| -> Result<_> { Ok((*raw).try_into()?) })
+                .collect::<Result<Vec<Document>>>()?;
+            Ok(crate::coll::options::UpdateModifications::Pipeline(
+                pipeline,
+            ))
+        }
+    }
+}
+
+pub(crate) unsafe fn parse_foad_options(
+    opts: *const crate::ffi::find_one::FindOneAndDeleteOptions,
+    ctx: *const OperationContext,
+) -> Result<crate::coll::options::FindOneAndDeleteOptions> {
+    let mut options = crate::coll::options::FindOneAndDeleteOptions::default();
+    options.write_concern = ctx.write_concern();
+
+    if opts.is_null() {
+        return Ok(options);
+    }
+    let opts = &*opts;
+
+    options.max_time = i64_to_duration_ms(opts.max_time_ms);
+    options.projection = Bson::to_doc(opts.projection)?;
+    options.sort = Bson::to_doc(opts.sort)?;
+    options.hint = parse_hint(opts.hint_name, opts.hint_keys)?;
+    options.let_vars = Bson::to_doc(opts.let_vars)?;
+    if let Some(doc) = Bson::to_doc(opts.collation)? {
+        options.collation = Some(crate::bson_compat::deserialize_from_document(doc)?);
+    }
+    if !opts.comment.is_null() {
+        options.comment = (&*opts.comment).to_bson()?;
+    }
+    Ok(options)
+}
+
+pub(crate) unsafe fn parse_foar_options(
+    opts: *const crate::ffi::find_one::FindOneAndReplaceOptions,
+    ctx: *const OperationContext,
+) -> Result<crate::coll::options::FindOneAndReplaceOptions> {
+    let mut options = crate::coll::options::FindOneAndReplaceOptions::default();
+    options.write_concern = ctx.write_concern();
+
+    if opts.is_null() {
+        return Ok(options);
+    }
+    let opts = &*opts;
+
+    options.bypass_document_validation = i8_to_option_bool(opts.bypass_document_validation);
+    options.max_time = i64_to_duration_ms(opts.max_time_ms);
+    options.projection = Bson::to_doc(opts.projection)?;
+    options.return_document = parse_return_document(opts.return_document);
+    options.sort = Bson::to_doc(opts.sort)?;
+    options.upsert = i8_to_option_bool(opts.upsert);
+    options.hint = parse_hint(opts.hint_name, opts.hint_keys)?;
+    options.let_vars = Bson::to_doc(opts.let_vars)?;
+    if let Some(doc) = Bson::to_doc(opts.collation)? {
+        options.collation = Some(crate::bson_compat::deserialize_from_document(doc)?);
+    }
+    if !opts.comment.is_null() {
+        options.comment = (&*opts.comment).to_bson()?;
+    }
+    Ok(options)
+}
+
+pub(crate) unsafe fn parse_foau_options(
+    opts: *const crate::ffi::find_one::FindOneAndUpdateOptions,
+    ctx: *const OperationContext,
+) -> Result<crate::coll::options::FindOneAndUpdateOptions> {
+    let mut options = crate::coll::options::FindOneAndUpdateOptions::default();
+    options.write_concern = ctx.write_concern();
+
+    if opts.is_null() {
+        return Ok(options);
+    }
+    let opts = &*opts;
+
+    options.bypass_document_validation = i8_to_option_bool(opts.bypass_document_validation);
+    options.max_time = i64_to_duration_ms(opts.max_time_ms);
+    options.projection = Bson::to_doc(opts.projection)?;
+    options.return_document = parse_return_document(opts.return_document);
+    options.sort = Bson::to_doc(opts.sort)?;
+    options.upsert = i8_to_option_bool(opts.upsert);
+    options.hint = parse_hint(opts.hint_name, opts.hint_keys)?;
+    options.let_vars = Bson::to_doc(opts.let_vars)?;
+    if let Some(doc) = Bson::to_doc(opts.collation)? {
+        options.collation = Some(crate::bson_compat::deserialize_from_document(doc)?);
+    }
+    if !opts.comment.is_null() {
+        options.comment = (&*opts.comment).to_bson()?;
+    }
+    if !opts.array_filters.is_empty() {
+        let filters = opts
+            .array_filters
+            .to_raw_docs()
+            .iter()
+            .map(|raw| -> Result<_> { Ok((*raw).try_into()?) })
+            .collect::<Result<Vec<Document>>>()?;
+        options.array_filters = Some(filters);
+    }
+    Ok(options)
+}
+
+// --- Prepare functions ---
+
+pub(crate) unsafe fn prepare_find_one_and_delete(
+    client: &crate::Client,
+    ctx: *const OperationContext,
+    db_name: *const c_char,
+    coll_name: *const c_char,
+    filter: *const Bson,
+    opts: *const crate::ffi::find_one::FindOneAndDeleteOptions,
+) -> Result<(
+    Collection<Document>,
+    Document,
+    crate::coll::options::FindOneAndDeleteOptions,
+)> {
+    use crate::error::Error;
+
+    if filter.is_null() {
+        return Err(Error::invalid_argument("filter cannot be null"));
+    }
+    let db = c_char_to_str(db_name)?
+        .ok_or_else(|| Error::invalid_argument("db_name cannot be null"))?;
+    let coll_name_str = c_char_to_str(coll_name)?
+        .ok_or_else(|| Error::invalid_argument("coll_name cannot be null"))?;
+    let coll = client.database(db).collection::<Document>(coll_name_str);
+    let filter_doc: Document = (&*filter).as_raw_doc()?.try_into()?;
+    let options = parse_foad_options(opts, ctx)?;
+    Ok((coll, filter_doc, options))
+}
+
+pub(crate) async fn execute_find_one_and_delete(
+    coll: Collection<Document>,
+    filter_doc: Document,
+    options: crate::coll::options::FindOneAndDeleteOptions,
+    session: Option<&mut ClientSession>,
+) -> Result<Option<Document>> {
+    let mut action = coll.find_one_and_delete(filter_doc).with_options(options);
+    if let Some(session) = session {
+        action = action.session(session);
+    }
+    action.await
+}
+
+pub(crate) unsafe fn prepare_find_one_and_update(
+    client: &crate::Client,
+    ctx: *const OperationContext,
+    db_name: *const c_char,
+    coll_name: *const c_char,
+    filter: *const Bson,
+    update_doc: *const Bson,
+    update_pipeline: BsonArray,
+    opts: *const crate::ffi::find_one::FindOneAndUpdateOptions,
+) -> Result<(
+    Collection<Document>,
+    Document,
+    crate::coll::options::UpdateModifications,
+    crate::coll::options::FindOneAndUpdateOptions,
+)> {
+    use crate::error::Error;
+
+    if filter.is_null() {
+        return Err(Error::invalid_argument("filter cannot be null"));
+    }
+    let db = c_char_to_str(db_name)?
+        .ok_or_else(|| Error::invalid_argument("db_name cannot be null"))?;
+    let coll_name_str = c_char_to_str(coll_name)?
+        .ok_or_else(|| Error::invalid_argument("coll_name cannot be null"))?;
+    let coll = client.database(db).collection::<Document>(coll_name_str);
+    let filter_doc: Document = (&*filter).as_raw_doc()?.try_into()?;
+    let update = parse_update_mods(update_doc, update_pipeline)?;
+    let options = parse_foau_options(opts, ctx)?;
+    Ok((coll, filter_doc, update, options))
+}
+
+pub(crate) async fn execute_find_one_and_update(
+    coll: Collection<Document>,
+    filter_doc: Document,
+    modifications: crate::coll::options::UpdateModifications,
+    options: crate::coll::options::FindOneAndUpdateOptions,
+    session: Option<&mut ClientSession>,
+) -> Result<Option<Document>> {
+    let mut action = coll
+        .find_one_and_update(filter_doc, modifications)
+        .with_options(options);
+    if let Some(session) = session {
+        action = action.session(session);
+    }
+    action.await
+}
+
+pub(crate) unsafe fn prepare_find_one_and_replace(
+    client: &crate::Client,
+    ctx: *const OperationContext,
+    db_name: *const c_char,
+    coll_name: *const c_char,
+    filter: *const Bson,
+    replacement: *const Bson,
+    opts: *const crate::ffi::find_one::FindOneAndReplaceOptions,
+) -> Result<(
+    Collection<Document>,
+    Document,
+    Document,
+    crate::coll::options::FindOneAndReplaceOptions,
+)> {
+    use crate::error::Error;
+
+    if filter.is_null() {
+        return Err(Error::invalid_argument("filter cannot be null"));
+    }
+    if replacement.is_null() {
+        return Err(Error::invalid_argument("replacement cannot be null"));
+    }
+    let db = c_char_to_str(db_name)?
+        .ok_or_else(|| Error::invalid_argument("db_name cannot be null"))?;
+    let coll_name_str = c_char_to_str(coll_name)?
+        .ok_or_else(|| Error::invalid_argument("coll_name cannot be null"))?;
+    let coll = client.database(db).collection::<Document>(coll_name_str);
+    let filter_doc: Document = (&*filter).as_raw_doc()?.try_into()?;
+    let repl_bytes = {
+        let b = &*replacement;
+        std::slice::from_raw_parts(b.data, b.len).to_vec()
+    };
+    let replacement_doc: Document =
+        crate::bson::RawDocumentBuf::from_bytes(repl_bytes)?.try_into()?;
+    let options = parse_foar_options(opts, ctx)?;
+    Ok((coll, filter_doc, replacement_doc, options))
+}
+
+pub(crate) async fn execute_find_one_and_replace(
+    coll: Collection<Document>,
+    filter_doc: Document,
+    replacement_doc: Document,
+    options: crate::coll::options::FindOneAndReplaceOptions,
+    session: Option<&mut ClientSession>,
+) -> Result<Option<Document>> {
+    let mut action = coll
+        .find_one_and_replace(filter_doc, replacement_doc)
+        .with_options(options);
+    if let Some(session) = session {
+        action = action.session(session);
+    }
+    action.await
+}

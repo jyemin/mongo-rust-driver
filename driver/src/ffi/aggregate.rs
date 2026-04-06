@@ -7,22 +7,12 @@ use std::ffi::{c_char, c_void};
 
 use futures_util::stream::StreamExt;
 
-use crate::{
-    bson::Document,
-    ffi::{
-        client::MongoClient,
-        cursor::{CursorResult, FfiCursor},
-        error::Error,
-        types::{Bson, BsonArray, BsonValue, ContextExt, OperationContext},
-        utils::{
-            c_char_to_str,
-            c_char_to_string,
-            i64_to_duration_ms,
-            i8_to_option_bool,
-            with_err_callback,
-        },
-    },
-    options::{Hint, SelectionCriteria},
+use crate::ffi::{
+    client::MongoClient,
+    cursor::{CursorResult, FfiCursor},
+    error::Error,
+    types::{Bson, BsonArray, BsonValue, ContextExt, OperationContext},
+    utils::with_err_callback,
 };
 
 /// Callback for asynchronous aggregate results.
@@ -55,77 +45,6 @@ pub struct AggregateOptions {
     pub let_vars: *const Bson,
 }
 
-/// Build a pipeline (Vec<Document>) from a BsonArray of BSON documents.
-unsafe fn pipeline_from_array(
-    pipeline: BsonArray,
-) -> crate::error::Result<Vec<Document>> {
-    if pipeline.data.is_null() || pipeline.len == 0 {
-        return Ok(vec![]);
-    }
-    let ptrs = std::slice::from_raw_parts(pipeline.data, pipeline.len);
-    let mut docs = Vec::with_capacity(pipeline.len);
-    for &ptr in ptrs {
-        // Each pointer is a BSON document; read the 4-byte length prefix to get total size
-        let len_slice = std::slice::from_raw_parts(ptr, 4);
-        let len = i32::from_le_bytes(len_slice.try_into().unwrap()) as usize;
-        let doc_bytes = std::slice::from_raw_parts(ptr, len);
-        let raw_doc = crate::bson::RawDocument::from_bytes(doc_bytes)?;
-        let doc: Document = raw_doc.try_into()?;
-        docs.push(doc);
-    }
-    Ok(docs)
-}
-
-/// Parse FFI AggregateOptions into driver AggregateOptions.
-unsafe fn parse_aggregate_options(
-    opts: *const AggregateOptions,
-    ctx: *const OperationContext,
-) -> crate::error::Result<crate::coll::options::AggregateOptions> {
-    let mut options = crate::coll::options::AggregateOptions::default();
-
-    // Always set context-derived options
-    options.read_concern = ctx.read_concern();
-    options.write_concern = ctx.write_concern();
-    options.selection_criteria = ctx.read_preference().map(SelectionCriteria::ReadPreference);
-
-    if opts.is_null() {
-        return Ok(options);
-    }
-
-    let opts = &*opts;
-
-    options.allow_disk_use = i8_to_option_bool(opts.allow_disk_use);
-    options.batch_size = if opts.batch_size >= 0 {
-        Some(opts.batch_size as u32)
-    } else {
-        None
-    };
-    options.bypass_document_validation = i8_to_option_bool(opts.bypass_document_validation);
-
-    // Parse collation from BSON document
-    if let Some(doc) = Bson::to_doc(opts.collation)? {
-        options.collation = Some(crate::bson_compat::deserialize_from_document(doc)?);
-    }
-
-    // Parse comment (BsonValue)
-    if !opts.comment.is_null() {
-        options.comment = (&*opts.comment).to_bson()?;
-    }
-
-    // Parse hint (name takes precedence over keys)
-    options.hint = if let Some(name) = c_char_to_string(opts.hint_name)? {
-        Some(Hint::Name(name))
-    } else if let Some(keys) = Bson::to_doc(opts.hint_keys)? {
-        Some(Hint::Keys(keys))
-    } else {
-        None
-    };
-
-    options.max_time = i64_to_duration_ms(opts.max_time_ms);
-    options.let_vars = Bson::to_doc(opts.let_vars)?;
-
-    Ok(options)
-}
 
 /// Run an aggregation pipeline on a collection.
 #[no_mangle]
@@ -146,21 +65,9 @@ pub unsafe extern "C" fn mongo_aggregate_collection(
             return Err(Error::invalid_argument("client cannot be null"));
         }
 
-        let db_name_str = c_char_to_str(db_name)?
-            .ok_or_else(|| Error::invalid_argument("db_name cannot be null"))?;
-        let coll_name_str = c_char_to_str(coll_name)?
-            .ok_or_else(|| Error::invalid_argument("coll_name cannot be null"))?;
-
-        let client_ref = &*client;
-        let coll = client_ref
-            .client
-            .database(db_name_str)
-            .collection::<Document>(coll_name_str);
-
-        let pipeline_docs = pipeline_from_array(pipeline)?;
-        let options = parse_aggregate_options(opts, ctx)?;
-
-        Ok((coll, pipeline_docs, options))
+        crate::ffi::ops::aggregate::prepare_aggregate_collection(
+            &(*client).client, ctx, db_name, coll_name, pipeline, opts,
+        )
     });
 
     let mut session_ref = ctx.session();
@@ -242,16 +149,9 @@ pub unsafe extern "C" fn mongo_aggregate_database(
             return Err(Error::invalid_argument("client cannot be null"));
         }
 
-        let db_name_str = c_char_to_str(db_name)?
-            .ok_or_else(|| Error::invalid_argument("db_name cannot be null"))?;
-
-        let client_ref = &*client;
-        let db = client_ref.client.database(db_name_str);
-
-        let pipeline_docs = pipeline_from_array(pipeline)?;
-        let options = parse_aggregate_options(opts, ctx)?;
-
-        Ok((db, pipeline_docs, options))
+        crate::ffi::ops::aggregate::prepare_aggregate_database(
+            &(*client).client, ctx, db_name, pipeline, opts,
+        )
     });
 
     let mut session_ref = ctx.session();

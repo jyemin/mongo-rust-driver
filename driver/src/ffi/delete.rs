@@ -9,7 +9,7 @@ use crate::ffi::{
     client::MongoClient,
     error::Error,
     types::{Bson, BsonValue, ContextExt, OperationContext},
-    utils::{c_char_to_str, c_char_to_string, with_err_callback},
+    utils::with_err_callback,
 };
 
 /// Callback for delete operation results.
@@ -43,39 +43,6 @@ pub struct DeleteOptions {
     pub comment: *const BsonValue,
 }
 
-unsafe fn parse_delete_options(
-    opts: *const DeleteOptions,
-    ctx: *const OperationContext,
-) -> crate::error::Result<crate::coll::options::DeleteOptions> {
-    let mut options = crate::coll::options::DeleteOptions::default();
-    options.write_concern = ctx.write_concern();
-
-    if opts.is_null() {
-        return Ok(options);
-    }
-    let opts = &*opts;
-
-    options.hint = if let Some(name) = c_char_to_string(opts.hint_name)? {
-        Some(crate::options::Hint::Name(name))
-    } else if let Some(keys) = Bson::to_doc(opts.hint_keys)? {
-        Some(crate::options::Hint::Keys(keys))
-    } else {
-        None
-    };
-
-    if let Some(doc) = Bson::to_doc(opts.collation)? {
-        options.collation = Some(crate::bson_compat::deserialize_from_document(doc)?);
-    }
-
-    options.let_vars = Bson::to_doc(opts.let_vars)?;
-
-    if !opts.comment.is_null() {
-        options.comment = (&*opts.comment).to_bson()?;
-    }
-
-    Ok(options)
-}
-
 /// Delete up to one document matching `filter`.
 ///
 /// # Safety
@@ -101,35 +68,33 @@ pub unsafe extern "C" fn mongo_delete_one(
         if client.is_null() {
             return Err(Error::invalid_argument("client cannot be null"));
         }
-        if filter.is_null() {
-            return Err(Error::invalid_argument("filter cannot be null"));
-        }
-        let db = c_char_to_str(db_name)?
-            .ok_or_else(|| Error::invalid_argument("db_name cannot be null"))?;
-        let coll_name_str = c_char_to_str(coll_name)?
-            .ok_or_else(|| Error::invalid_argument("coll_name cannot be null"))?;
-        let coll = (*client).client
-            .database(db)
-            .collection::<crate::bson::Document>(coll_name_str);
-        let filter_doc: crate::bson::Document = (&*filter).as_raw_doc()?.try_into()?;
-        let options = parse_delete_options(opts, ctx)?;
-        Ok((coll, filter_doc, options))
+        super::ops::delete::prepare_delete(
+            &(*client).client,
+            ctx,
+            db_name,
+            coll_name,
+            filter,
+            opts,
+        )
     });
 
     let session_ref = ctx.session();
     let userdata_ptr = userdata as usize;
     let client_ref = &*client;
     client_ref.runtime.spawn(async move {
-        let mut action = coll.delete_one(filter_doc).with_options(options);
-        if let Some(session) = session_ref {
-            action = action.session(session);
-        }
-        let result = action.await;
+        let result =
+            super::ops::delete::execute_delete_one(coll, filter_doc, options, session_ref).await;
 
         let userdata = userdata_ptr as *mut c_void;
         with_err_callback!(callback, userdata, || {
             let r = result?;
-            callback(userdata, &DeleteResult { deleted_count: r.deleted_count }, std::ptr::null());
+            callback(
+                userdata,
+                &DeleteResult {
+                    deleted_count: r.deleted_count,
+                },
+                std::ptr::null(),
+            );
             Ok(())
         });
     });
@@ -156,35 +121,33 @@ pub unsafe extern "C" fn mongo_delete_many(
         if client.is_null() {
             return Err(Error::invalid_argument("client cannot be null"));
         }
-        if filter.is_null() {
-            return Err(Error::invalid_argument("filter cannot be null"));
-        }
-        let db = c_char_to_str(db_name)?
-            .ok_or_else(|| Error::invalid_argument("db_name cannot be null"))?;
-        let coll_name_str = c_char_to_str(coll_name)?
-            .ok_or_else(|| Error::invalid_argument("coll_name cannot be null"))?;
-        let coll = (*client).client
-            .database(db)
-            .collection::<crate::bson::Document>(coll_name_str);
-        let filter_doc: crate::bson::Document = (&*filter).as_raw_doc()?.try_into()?;
-        let options = parse_delete_options(opts, ctx)?;
-        Ok((coll, filter_doc, options))
+        super::ops::delete::prepare_delete(
+            &(*client).client,
+            ctx,
+            db_name,
+            coll_name,
+            filter,
+            opts,
+        )
     });
 
     let session_ref = ctx.session();
     let userdata_ptr = userdata as usize;
     let client_ref = &*client;
     client_ref.runtime.spawn(async move {
-        let mut action = coll.delete_many(filter_doc).with_options(options);
-        if let Some(session) = session_ref {
-            action = action.session(session);
-        }
-        let result = action.await;
+        let result =
+            super::ops::delete::execute_delete_many(coll, filter_doc, options, session_ref).await;
 
         let userdata = userdata_ptr as *mut c_void;
         with_err_callback!(callback, userdata, || {
             let r = result?;
-            callback(userdata, &DeleteResult { deleted_count: r.deleted_count }, std::ptr::null());
+            callback(
+                userdata,
+                &DeleteResult {
+                    deleted_count: r.deleted_count,
+                },
+                std::ptr::null(),
+            );
             Ok(())
         });
     });

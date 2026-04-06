@@ -7,13 +7,12 @@ mod tests;
 
 use std::{ffi::c_void, os::raw::c_char};
 
-use crate::{bson::RawDocumentBuf, ffi::utils::with_err_callback, options::RunCommandOptions};
+use crate::ffi::utils::with_err_callback;
 
 use super::{
     client::MongoClient,
     error::Error,
     types::{Bson, ContextExt, OperationContext, OwnedBson},
-    utils::c_char_to_str,
 };
 
 /// Callback type for run_command results.
@@ -55,42 +54,22 @@ pub unsafe extern "C" fn mongo_run_command(
     callback: RunCommandCallback,
     userdata: *mut c_void,
 ) {
+    use crate::ffi::ops::command::{execute_run_command, prepare_run_command};
+
     let (db, options, command_doc) = with_err_callback!(callback, userdata, || {
-        use crate::error::Error;
-
         if client.is_null() {
-            return Err(Error::invalid_argument("client cannot be null"));
+            return Err(crate::error::Error::invalid_argument(
+                "client cannot be null",
+            ));
         }
-        if command.is_null() {
-            return Err(Error::invalid_argument("command cannot be null"));
-        }
-
-        let db_name_str = c_char_to_str(db_name)?
-            .ok_or_else(|| Error::invalid_argument("db_name cannot be null"))?;
-        let client_ref = &*client;
-        let db = client_ref.client.database(db_name_str);
-
-        let mut options = RunCommandOptions::default();
-        options.selection_criteria = context
-            .read_preference()
-            .map(crate::selection_criteria::SelectionCriteria::ReadPreference);
-
-        let command_bson = &*command;
-        let command_bytes = std::slice::from_raw_parts(command_bson.data, command_bson.len);
-        let command_doc = RawDocumentBuf::from_bytes(command_bytes.to_vec())?;
-
-        Ok((db, options, command_doc))
+        prepare_run_command(&(*client).client, context, db_name, command)
     });
 
     let userdata_ptr = userdata as usize;
     let session_ref = context.session();
     let client_ref = &*client;
     client_ref.runtime.spawn(async move {
-        let mut action = db.run_raw_command(command_doc).with_options(options);
-        if let Some(session) = session_ref {
-            action = action.session(session);
-        }
-        let result = action.await;
+        let result = execute_run_command(db, options, command_doc, session_ref).await;
 
         let userdata = userdata_ptr as *mut c_void;
         with_err_callback!(callback, userdata, || {
