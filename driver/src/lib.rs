@@ -40,7 +40,7 @@ pub(crate) mod cursor;
 mod db;
 pub mod error;
 pub mod event;
-#[cfg(feature = "ffi")]
+#[cfg(any(feature = "ffi", feature = "ffi-future"))]
 pub mod ffi;
 pub mod gridfs;
 mod hello;

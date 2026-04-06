@@ -11,3 +11,6 @@ pub(crate) mod ops;
 
 #[cfg(feature = "ffi")]
 pub mod callback;
+
+#[cfg(feature = "ffi-future")]
+pub mod future;

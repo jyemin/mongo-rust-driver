@@ -82,8 +82,11 @@ opentelemetry = ["dep:opentelemetry"]
 # Capture backtraces in errors.  This can be slow, memory intensive, and very verbose.
 error-backtrace = []
 
-# Enable the FFI interface.
+# Enable the callback-based FFI interface (shared global tokio runtime, callbacks).
 ffi = ["bson-3"]
+
+# Enable the future-based FFI interface (per-client current_thread tokio, no callbacks).
+ffi-future = ["bson-3"]
 
 [dependencies]
 base64 = "0.22"
